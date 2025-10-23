@@ -1,0 +1,60 @@
+{
+  "name": "electron-svelte-app",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "electron": "cross-env NODE_ENV=development electron .",
+    "electron:dev": "concurrently --raw \"npm run dev\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "electron:build": "npm run build && electron-builder",
+    "electron:build:win": "npm run build && electron-builder --win",
+    "electron:build:mac": "npm run build && electron-builder --mac",
+    "electron:build:linux": "npm run build && electron-builder --linux"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^38.2.0",
+    "electron-builder": "^26.0.12",
+    "svelte": "^5.39.4",
+    "vite": "npm:rolldown-vite@7.1.12",
+    "wait-on": "^9.0.1"
+  },
+  "overrides": {
+    "vite": "npm:rolldown-vite@7.1.12"
+  },
+  "build": {
+    "appId": "com.electron.svelte.app",
+    "productName": "Electron Svelte App",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.utilities"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    }
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "prismjs": "^1.30.0",
+    "sql.js": "^1.13.0",
+    "twilio": "^5.10.2"
+  }
+}
