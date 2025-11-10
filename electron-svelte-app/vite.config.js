@@ -13,7 +13,7 @@ export default defineConfig({
   },
   // Configure server for development
   server: {
-    port: 5173,
+    port: 5770,
     strictPort: true,
   },
 })

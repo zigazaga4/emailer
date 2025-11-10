@@ -1,11 +1,14 @@
 <script>
   import { onMount } from 'svelte';
+  import { Settings, FileText } from 'lucide-svelte';
   import Sidebar from './lib/components/composers/Sidebar.svelte';
   import AddContactModal from './lib/components/modals/AddContactModal.svelte';
   import AddWhatsAppContactModal from './lib/components/modals/AddWhatsAppContactModal.svelte';
   import ImportContactsModal from './lib/components/modals/ImportContactsModal.svelte';
   import CreateListModal from './lib/components/modals/CreateListModal.svelte';
   import ManageListsModal from './lib/components/modals/ManageListsModal.svelte';
+  import EmailSettingsModal from './lib/components/modals/EmailSettingsModal.svelte';
+  import LogsModal from './lib/components/modals/LogsModal.svelte';
   import EmailComposer from './lib/components/composers/EmailComposer.svelte';
   import MessagesComposer from './lib/components/composers/MessagesComposer.svelte';
   import { initDatabase, deleteAllContacts, deleteAllWhatsAppContacts } from './lib/stores/database.js';
@@ -18,6 +21,8 @@
   let isImportModalOpen = $state(false);
   let isCreateListModalOpen = $state(false);
   let isManageListsModalOpen = $state(false);
+  let isEmailSettingsModalOpen = $state(false);
+  let isLogsModalOpen = $state(false);
   let selectedContact = $state(null);
   let contactForListManagement = $state(null);
   let isLoading = $state(true);
@@ -122,6 +127,34 @@
   function handleSelectedListChange(listId) {
     currentSelectedListId = listId;
   }
+
+  /**
+   * Handle opening email settings modal
+   */
+  function handleOpenEmailSettings() {
+    isEmailSettingsModalOpen = true;
+  }
+
+  /**
+   * Handle closing email settings modal
+   */
+  function handleCloseEmailSettings() {
+    isEmailSettingsModalOpen = false;
+  }
+
+  /**
+   * Handle opening logs modal
+   */
+  function handleOpenLogs() {
+    isLogsModalOpen = true;
+  }
+
+  /**
+   * Handle closing logs modal
+   */
+  function handleCloseLogs() {
+    isLogsModalOpen = false;
+  }
 </script>
 
 {#if isLoading}
@@ -145,6 +178,20 @@
         onclick={() => activeTab = 'messages'}
       >
         Messages
+      </button>
+      <button
+        class="settings-button"
+        onclick={handleOpenEmailSettings}
+        title="Email Settings"
+      >
+        <Settings size={20} />
+      </button>
+      <button
+        class="settings-button"
+        onclick={handleOpenLogs}
+        title="View Logs"
+      >
+        <FileText size={20} />
       </button>
     </div>
 
@@ -195,6 +242,16 @@
       isOpen={isManageListsModalOpen}
       contact={contactForListManagement}
       onClose={handleCloseManageListsModal}
+    />
+
+    <EmailSettingsModal
+      isOpen={isEmailSettingsModalOpen}
+      onClose={handleCloseEmailSettings}
+    />
+
+    <LogsModal
+      isOpen={isLogsModalOpen}
+      onClose={handleCloseLogs}
     />
   </div>
 {/if}
@@ -271,6 +328,24 @@
   .tab-button.active {
     color: #fff;
     border-bottom-color: #0066ff;
+  }
+
+  .settings-button {
+    margin-left: auto;
+    padding: 16px 24px;
+    background-color: transparent;
+    color: #999;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .settings-button:hover {
+    color: #fff;
+    background-color: #242424;
   }
 
   .content-wrapper {

@@ -2,6 +2,8 @@
   "name": "electron-svelte-app",
   "private": true,
   "version": "0.0.0",
+  "description": "Emailer application built with Electron and Svelte",
+  "author": "Priemschi Leonard",
   "type": "module",
   "main": "electron/main.js",
   "scripts": {
@@ -9,7 +11,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "electron": "cross-env NODE_ENV=development electron .",
-    "electron:dev": "concurrently --raw \"npm run dev\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "electron:dev": "concurrently --raw \"npm run dev\" \"wait-on http://localhost:5770 && cross-env NODE_ENV=development electron .\"",
     "electron:build": "npm run build && electron-builder",
     "electron:build:win": "npm run build && electron-builder --win",
     "electron:build:mac": "npm run build && electron-builder --mac",
@@ -31,13 +33,18 @@
   "build": {
     "appId": "com.electron.svelte.app",
     "productName": "Electron Svelte App",
+    "publish": null,
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/sql.js/dist/sql-wasm.wasm"
+    ],
+    "asarUnpack": [
+      "node_modules/sql.js/dist/sql-wasm.wasm"
     ],
     "mac": {
       "target": "dmg",
@@ -53,6 +60,8 @@
   },
   "dependencies": {
     "dotenv": "^17.2.3",
+    "lucide-svelte": "^0.548.0",
+    "nodemailer": "^7.0.10",
     "prismjs": "^1.30.0",
     "sql.js": "^1.13.0",
     "twilio": "^5.10.2"

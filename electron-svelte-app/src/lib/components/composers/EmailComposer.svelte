@@ -4,9 +4,11 @@
    * Full-featured email composition interface with rich text editing
    */
 
+  import { X } from 'lucide-svelte';
   import { sendEmail as sendEmailViaIPC } from '../../services/zoho-ipc.js';
   import { contactsStore, getContactsInList, listsStore, listMembershipsVersion } from '../../stores/database.js';
   import { emailSendingProgress } from '../../stores/emailSendingStore.js';
+  import logger from '../../services/logger-ipc.js';
 
   /**
    * Component props
@@ -35,6 +37,52 @@
   let paramSearchQuery = $state('');
   let selectedParamIndex = $state(0);
   let activeInputElement = $state(null);
+
+  /**
+   * Button customization modal state
+   */
+  let showButtonModal = $state(false);
+  let showUnsubscribeModal = $state(false);
+  let showLayoutModal = $state(false);
+  let buttonConfig = $state({
+    text: 'Click Here',
+    url: 'https://example.com',
+    backgroundColor: '#0066ff',
+    textColor: '#ffffff',
+    borderRadius: '8px',
+    padding: '12px 24px',
+    fontSize: '16px'
+  });
+  let unsubscribeConfig = $state({
+    text: 'Unsubscribe',
+    url: 'https://example.com/unsubscribe',
+    backgroundColor: '#777777',
+    textColor: '#ffffff',
+    borderRadius: '4px',
+    padding: '8px 16px',
+    fontSize: '14px'
+  });
+  let layoutConfig = $state({
+    leftContent: '',
+    rightContent: '',
+    leftAlign: 'left',
+    rightAlign: 'right',
+    gap: '20px',
+    padding: '20px 0',
+    leftButtonType: 'none',
+    rightButtonType: 'none',
+    leftButtonText: 'Click Here',
+    leftButtonUrl: 'https://example.com',
+    leftButtonBg: '#0066ff',
+    leftButtonColor: '#ffffff',
+    rightButtonText: 'Unsubscribe',
+    rightButtonUrl: 'https://example.com/unsubscribe',
+    rightButtonBg: '#777777',
+    rightButtonColor: '#ffffff'
+  });
+
+  let selectedImage = $state(null);
+  let isResizingImage = $state(false);
 
   /**
    * Available parameters for email templates
@@ -67,7 +115,18 @@
   let isBold = $state(false);
   let isItalic = $state(false);
   let isUnderline = $state(false);
-  
+
+  /**
+   * Effect to attach image resize handlers when body changes
+   */
+  $effect(() => {
+    if (body) {
+      setTimeout(() => {
+        attachImageResizeHandlers();
+      }, 100);
+    }
+  });
+
   /**
    * Replace parameters in text with actual contact data
    * Handles both plain text {param(name)} and HTML with highlighting spans
@@ -82,18 +141,56 @@
       /<span class="param-highlight">\{param\(<span class="param-name">(\w+)<\/span>\)\}<\/span>/g,
       (match, paramName) => {
         const value = contact[paramName];
-        return value !== undefined && value !== null ? value : match;
+        return value !== undefined && value !== null ? String(value) : match;
       }
     );
 
-    // Then, handle plain text parameters (for subject line and any plain text)
+    // Handle corrupted HTML where spans might be broken
+    // Pattern: {param(<span class="param-name">name</span>)} or variations
+    result = result.replace(
+      /\{param\(<span class="param-name">(\w+)<\/span>\)\}/g,
+      (match, paramName) => {
+        const value = contact[paramName];
+        return value !== undefined && value !== null ? String(value) : match;
+      }
+    );
+
+    // Handle plain text parameters (for subject line and any plain text)
     // Pattern: {param(name)}
     result = result.replace(/\{param\((\w+)\)\}/g, (match, paramName) => {
       const value = contact[paramName];
-      return value !== undefined && value !== null ? value : match;
+      return value !== undefined && value !== null ? String(value) : match;
     });
 
     return result;
+  }
+
+  /**
+   * Validate that all parameters were replaced
+   * @param {string} text - Text to validate
+   * @returns {Object} { isValid: boolean, unreplacedParams: Array }
+   */
+  function validateParameterReplacement(text) {
+    const unreplacedParams = [];
+
+    // Check for any remaining {param(...)} patterns
+    const paramPattern = /\{param\((\w+)\)\}/g;
+    let match;
+
+    while ((match = paramPattern.exec(text)) !== null) {
+      unreplacedParams.push(match[1]);
+    }
+
+    // Also check for span-wrapped params
+    const spanParamPattern = /\{param\(<span class="param-name">(\w+)<\/span>\)\}/g;
+    while ((match = spanParamPattern.exec(text)) !== null) {
+      unreplacedParams.push(match[1]);
+    }
+
+    return {
+      isValid: unreplacedParams.length === 0,
+      unreplacedParams: [...new Set(unreplacedParams)]
+    };
   }
 
 
@@ -101,9 +198,8 @@
   /**
    * Handle input in subject or body to detect { trigger
    * @param {Event} event - Input event
-   * @param {string} field - 'subject' or 'body'
    */
-  function handleInput(event, field) {
+  function handleInput(event) {
     const target = event.target;
     if (!target) return;
 
@@ -264,25 +360,6 @@
   }
 
   /**
-   * Set caret position in contenteditable element
-   * @param {HTMLElement} element - The element
-   * @param {number} pos - Position to set
-   */
-  function setCaretPosition(element, pos) {
-    const range = document.createRange();
-    const sel = window.getSelection();
-
-    if (element.childNodes.length > 0) {
-      const textNode = element.childNodes[0];
-      const safePos = Math.min(pos, textNode.textContent.length);
-      range.setStart(textNode, safePos);
-      range.collapse(true);
-      sel.removeAllRanges();
-      sel.addRange(range);
-    }
-  }
-
-  /**
    * Handle keyboard navigation in parameter dropdown
    * @param {KeyboardEvent} event - Keyboard event
    */
@@ -309,30 +386,269 @@
 
   /**
    * Apply text formatting to selected text
+   * Note: execCommand is deprecated but still widely supported with no official replacement
    * @param {string} command - Format command (bold, italic, underline)
    */
   function applyFormatting(command) {
+    // eslint-disable-next-line deprecation/deprecation
     document.execCommand(command, false, null);
     updateFormattingState();
   }
-  
+
   /**
    * Update formatting button states based on current selection
+   * Note: queryCommandState is deprecated but still widely supported with no official replacement
    */
   function updateFormattingState() {
+    // eslint-disable-next-line deprecation/deprecation
     isBold = document.queryCommandState('bold');
+    // eslint-disable-next-line deprecation/deprecation
     isItalic = document.queryCommandState('italic');
+    // eslint-disable-next-line deprecation/deprecation
     isUnderline = document.queryCommandState('underline');
   }
-  
+
   /**
    * Insert link into email body
+   * Note: execCommand is deprecated but still widely supported with no official replacement
    */
   function insertLink() {
     const url = prompt('Enter URL:');
     if (url) {
+      // eslint-disable-next-line deprecation/deprecation
       document.execCommand('createLink', false, url);
     }
+  }
+
+  /**
+   * Open button customization modal
+   */
+  function openButtonModal() {
+    showParamDropdown = false;
+    activeInputElement = null;
+    showButtonModal = true;
+  }
+
+  /**
+   * Open unsubscribe button modal
+   */
+  function openUnsubscribeModal() {
+    showParamDropdown = false;
+    activeInputElement = null;
+    showUnsubscribeModal = true;
+  }
+
+  /**
+   * Close button modal
+   */
+  function closeButtonModal() {
+    showButtonModal = false;
+  }
+
+  /**
+   * Close unsubscribe modal
+   */
+  function closeUnsubscribeModal() {
+    showUnsubscribeModal = false;
+  }
+
+  /**
+   * Open layout modal
+   */
+  function openLayoutModal() {
+    showParamDropdown = false;
+    activeInputElement = null;
+    showLayoutModal = true;
+  }
+
+  /**
+   * Close layout modal
+   */
+  function closeLayoutModal() {
+    showLayoutModal = false;
+  }
+
+  /**
+   * Generate button HTML based on type and configuration
+   */
+  function generateButtonHTML(type, text, url, bgColor, textColor) {
+    if (type === 'none') return '';
+
+    if (type === 'link') {
+      return `
+        <a href="${url}"
+           style="display: inline-block;
+                  background-color: ${bgColor};
+                  color: ${textColor};
+                  padding: 12px 24px;
+                  text-decoration: none;
+                  border-radius: 8px;
+                  font-size: 16px;
+                  font-weight: 600;
+                  transition: opacity 0.2s;"
+           onmouseover="this.style.opacity='0.8'"
+           onmouseout="this.style.opacity='1'">
+          ${text}
+        </a>
+      `;
+    }
+
+    if (type === 'unsubscribe') {
+      return `
+        <div style="padding: 15px 0;">
+          <p style="color: #888; font-size: 12px; margin-bottom: 10px;">
+            Don't want to receive these emails?
+          </p>
+          <a href="${url}"
+             style="display: inline-block;
+                    background-color: ${bgColor};
+                    color: ${textColor};
+                    padding: 8px 16px;
+                    text-decoration: none;
+                    border-radius: 4px;
+                    font-size: 14px;
+                    font-weight: 500;
+                    transition: opacity 0.2s;"
+             onmouseover="this.style.opacity='0.8'"
+             onmouseout="this.style.opacity='1'">
+            ${text}
+          </a>
+        </div>
+      `;
+    }
+
+    return '';
+  }
+
+  /**
+   * Insert two-column layout into email body
+   */
+  function insertLayout() {
+    const leftButton = generateButtonHTML(
+      layoutConfig.leftButtonType,
+      layoutConfig.leftButtonText,
+      layoutConfig.leftButtonUrl,
+      layoutConfig.leftButtonBg,
+      layoutConfig.leftButtonColor
+    );
+
+    const rightButton = generateButtonHTML(
+      layoutConfig.rightButtonType,
+      layoutConfig.rightButtonText,
+      layoutConfig.rightButtonUrl,
+      layoutConfig.rightButtonBg,
+      layoutConfig.rightButtonColor
+    );
+
+    const leftContent = layoutConfig.leftContent || leftButton || '<p style="color: #888; font-style: italic;">Left column content</p>';
+    const rightContent = layoutConfig.rightContent || rightButton || '<p style="color: #888; font-style: italic;">Right column content</p>';
+
+    const layoutHTML = `
+      <div style="margin: ${layoutConfig.padding}; width: 100%; max-width: 100%;">
+        <table style="width: 100%; border-collapse: collapse;" cellpadding="0" cellspacing="0">
+          <tr>
+            <td style="width: 100%; padding: 10px; text-align: ${layoutConfig.leftAlign};">
+              ${leftContent}
+            </td>
+          </tr>
+          <tr>
+            <td style="width: 100%; padding: 10px; text-align: ${layoutConfig.rightAlign};">
+              ${rightContent}
+            </td>
+          </tr>
+        </table>
+      </div>
+      <p><br></p>
+    `;
+
+    const bodyEditor = document.querySelector('.email-body-editor');
+    if (bodyEditor instanceof HTMLElement) {
+      bodyEditor.focus();
+      // eslint-disable-next-line deprecation/deprecation
+      document.execCommand('insertHTML', false, layoutHTML);
+      body = bodyEditor.innerHTML;
+    }
+
+    // Reset layout config for next use
+    layoutConfig.leftContent = '';
+    layoutConfig.rightContent = '';
+    layoutConfig.leftButtonType = 'none';
+    layoutConfig.rightButtonType = 'none';
+
+    closeLayoutModal();
+  }
+
+  /**
+   * Insert custom button into email body
+   */
+  function insertCustomButton() {
+    const buttonHTML = `
+      <div style="margin: 20px 0; text-align: center;">
+        <a href="${buttonConfig.url}"
+           style="display: inline-block;
+                  background-color: ${buttonConfig.backgroundColor};
+                  color: ${buttonConfig.textColor};
+                  padding: ${buttonConfig.padding};
+                  text-decoration: none;
+                  border-radius: ${buttonConfig.borderRadius};
+                  font-size: ${buttonConfig.fontSize};
+                  font-weight: 600;
+                  transition: opacity 0.2s;"
+           onmouseover="this.style.opacity='0.8'"
+           onmouseout="this.style.opacity='1'">
+          ${buttonConfig.text}
+        </a>
+      </div>
+      <p><br></p>
+    `;
+
+    const bodyEditor = document.querySelector('.email-body-editor');
+    if (bodyEditor instanceof HTMLElement) {
+      bodyEditor.focus();
+      // eslint-disable-next-line deprecation/deprecation
+      document.execCommand('insertHTML', false, buttonHTML);
+      body = bodyEditor.innerHTML;
+    }
+
+    closeButtonModal();
+  }
+
+  /**
+   * Insert unsubscribe button into email body
+   */
+  function insertUnsubscribeButton() {
+    const unsubscribeHTML = `
+      <div style="margin: 30px 0; padding: 20px 0; text-align: center;">
+        <p style="color: #888; font-size: 12px; margin-bottom: 10px;">
+          Don't want to receive these emails anymore?
+        </p>
+        <a href="${unsubscribeConfig.url}"
+           style="display: inline-block;
+                  background-color: ${unsubscribeConfig.backgroundColor};
+                  color: ${unsubscribeConfig.textColor};
+                  padding: ${unsubscribeConfig.padding};
+                  text-decoration: none;
+                  border-radius: ${unsubscribeConfig.borderRadius};
+                  font-size: ${unsubscribeConfig.fontSize};
+                  font-weight: 500;
+                  transition: opacity 0.2s;"
+           onmouseover="this.style.opacity='0.8'"
+           onmouseout="this.style.opacity='1'">
+          ${unsubscribeConfig.text}
+        </a>
+      </div>
+      <p><br></p>
+    `;
+
+    const bodyEditor = document.querySelector('.email-body-editor');
+    if (bodyEditor instanceof HTMLElement) {
+      bodyEditor.focus();
+      // eslint-disable-next-line deprecation/deprecation
+      document.execCommand('insertHTML', false, unsubscribeHTML);
+      body = bodyEditor.innerHTML;
+    }
+
+    closeUnsubscribeModal();
   }
   
   /**
@@ -350,6 +666,186 @@
         file: file
       }))];
     }
+  }
+
+  /**
+   * Handle image insertion into email body
+   * @param {Event} event - File input change event
+   */
+  function handleImageInsertion(event) {
+    const target = event.target;
+    if (target instanceof HTMLInputElement && target.files && target.files[0]) {
+      const file = target.files[0];
+
+      if (!file.type.startsWith('image/')) {
+        alert('Please select an image file');
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const imageUrl = e.target?.result;
+        if (typeof imageUrl === 'string') {
+          const img = new Image();
+          img.onload = () => {
+            const aspectRatio = img.height / img.width;
+            const initialWidth = Math.min(400, img.width);
+            const initialHeight = initialWidth * aspectRatio;
+
+            const imageHTML = `
+              <div style="margin: 20px 0; text-align: center; position: relative; display: inline-block;">
+                <img src="${imageUrl}"
+                     style="width: ${initialWidth}px; height: ${initialHeight}px; cursor: default; border: 2px solid transparent; display: block;"
+                     class="resizable-image"
+                     draggable="false"
+                     alt="Inserted image" />
+              </div>
+              <p><br></p>
+            `;
+
+            const bodyEditor = document.querySelector('.email-body-editor');
+            if (bodyEditor instanceof HTMLElement) {
+              bodyEditor.focus();
+              // eslint-disable-next-line deprecation/deprecation
+              document.execCommand('insertHTML', false, imageHTML);
+              body = bodyEditor.innerHTML;
+
+              setTimeout(() => {
+                attachImageResizeHandlers();
+              }, 100);
+            }
+          };
+          img.src = imageUrl;
+        }
+      };
+      reader.readAsDataURL(file);
+
+      target.value = '';
+    }
+  }
+
+  /**
+   * Handle HTML file import
+   * @param {Event} event - File input change event
+   */
+  function handleHTMLImport(event) {
+    const target = event.target;
+    if (target instanceof HTMLInputElement && target.files && target.files[0]) {
+      const file = target.files[0];
+
+      if (!file.name.endsWith('.html') && !file.name.endsWith('.htm')) {
+        alert('Please select an HTML file');
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const htmlContent = e.target?.result;
+        if (typeof htmlContent === 'string') {
+          const bodyEditor = document.querySelector('.email-body-editor');
+          if (bodyEditor instanceof HTMLElement) {
+            bodyEditor.focus();
+            // eslint-disable-next-line deprecation/deprecation
+            document.execCommand('insertHTML', false, htmlContent);
+            body = bodyEditor.innerHTML;
+          }
+        }
+      };
+      reader.readAsText(file);
+
+      target.value = '';
+    }
+  }
+
+  /**
+   * Attach resize handlers to all images in the editor
+   */
+  function attachImageResizeHandlers() {
+    const bodyEditor = document.querySelector('.email-body-editor');
+    if (!bodyEditor) return;
+
+    const images = bodyEditor.querySelectorAll('img.resizable-image');
+    images.forEach(img => {
+      if (img instanceof HTMLImageElement) {
+        if (img.dataset.handlerAttached === 'true') return;
+        img.dataset.handlerAttached = 'true';
+
+        let startX = 0;
+        let startY = 0;
+        let startWidth = 0;
+        let startHeight = 0;
+        let isResizing = false;
+
+        const onMouseDown = (e) => {
+          const rect = img.getBoundingClientRect();
+          const offsetX = e.clientX - rect.left;
+          const offsetY = e.clientY - rect.top;
+
+          if (offsetX > rect.width - 30 && offsetY > rect.height - 30) {
+            isResizing = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            startWidth = img.width;
+            startHeight = img.height;
+            e.preventDefault();
+            e.stopPropagation();
+
+            img.style.border = '2px solid #0066ff';
+            img.classList.add('resizing');
+            selectedImage = img;
+            isResizingImage = true;
+
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+          }
+        };
+
+        const onMouseMove = (e) => {
+          if (!isResizing) {
+            const rect = img.getBoundingClientRect();
+            const offsetX = e.clientX - rect.left;
+            const offsetY = e.clientY - rect.top;
+
+            if (offsetX > rect.width - 30 && offsetY > rect.height - 30) {
+              img.style.cursor = 'nwse-resize';
+            } else {
+              img.style.cursor = 'default';
+            }
+            return;
+          }
+
+          const deltaX = e.clientX - startX;
+          const aspectRatio = startHeight / startWidth;
+          const newWidth = Math.max(100, Math.min(800, startWidth + deltaX));
+          const newHeight = newWidth * aspectRatio;
+
+          img.style.width = newWidth + 'px';
+          img.style.height = newHeight + 'px';
+          e.preventDefault();
+        };
+
+        const onMouseUp = () => {
+          if (isResizing) {
+            isResizing = false;
+            img.style.border = '2px solid transparent';
+            img.classList.remove('resizing');
+            selectedImage = null;
+            isResizingImage = false;
+
+            const bodyEditor = document.querySelector('.email-body-editor');
+            if (bodyEditor instanceof HTMLElement) {
+              body = bodyEditor.innerHTML;
+            }
+
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+          }
+        };
+
+        img.addEventListener('mousedown', onMouseDown);
+        img.addEventListener('mousemove', onMouseMove);
+      }
+    });
   }
   
   /**
@@ -416,6 +912,10 @@
    * Handle email send to all contacts in selected list
    */
   async function handleSendToAll() {
+    // Close parameter dropdown if open
+    showParamDropdown = false;
+    activeInputElement = null;
+
     // Validate form
     if (!subject.trim()) {
       alert('Please enter a subject');
@@ -458,6 +958,13 @@
       errors: []
     };
 
+    // Log email sending start
+    logger.info('email', `Starting email send to ${contacts.length} contacts in ${selectionName}`, {
+      contactCount: contacts.length,
+      listId: selectedListId,
+      subject: subject.substring(0, 100)
+    });
+
     try {
       console.log(`Sending email to ${contacts.length} contacts in ${selectionName}...`);
 
@@ -479,10 +986,49 @@
           const personalizedSubject = replaceParameters(subject.trim(), contact);
           const personalizedBody = replaceParameters(body, contact);
 
+          // Validate parameter replacement
+          const subjectValidation = validateParameterReplacement(personalizedSubject);
+          const bodyValidation = validateParameterReplacement(personalizedBody);
+
+          if (!subjectValidation.isValid || !bodyValidation.isValid) {
+            const unreplacedParams = [
+              ...subjectValidation.unreplacedParams,
+              ...bodyValidation.unreplacedParams
+            ];
+            const errorMsg = `Failed to replace parameters for ${contact.name} (${contact.email}). ` +
+              `Missing contact data for: ${unreplacedParams.join(', ')}. ` +
+              `\n\nEmail sending stopped at contact ${i + 1} of ${contacts.length}.`;
+
+            console.error('❌ Parameter replacement failed:', {
+              contact: contact.name,
+              email: contact.email,
+              unreplacedParams
+            });
+
+            // Log parameter replacement failure
+            logger.error('email', 'Parameter replacement failed', {
+              contact: contact.name,
+              email: contact.email,
+              unreplacedParams,
+              position: `${i + 1} of ${contacts.length}`
+            });
+
+            // Mark as failed
+            emailSendingProgress.markFailed(contact.id);
+            results.failed++;
+            results.errors.push({
+              contact: contact.name,
+              email: contact.email,
+              error: `Missing contact data for: ${unreplacedParams.join(', ')}`
+            });
+
+            // Stop sending and show error
+            alert(errorMsg);
+            throw new Error(errorMsg);
+          }
+
           console.log(`Personalized subject: "${personalizedSubject}"`);
           console.log(`Parameters replaced for: ${contact.name}`);
-          console.log(`Original body (first 200 chars):`, body.substring(0, 200));
-          console.log(`Personalized body (first 200 chars):`, personalizedBody.substring(0, 200));
 
           // Prepare email data
           const emailData = {
@@ -501,6 +1047,13 @@
 
           results.success++;
           console.log(`✅ Sent to ${contact.email}`);
+
+          // Log successful send
+          logger.info('email', `Email sent successfully to ${contact.name}`, {
+            to: contact.email,
+            subject: personalizedSubject,
+            position: `${i + 1} of ${contacts.length}`
+          });
 
           // Mark contact as completed in the store
           emailSendingProgress.markCompleted(contact.id);
@@ -530,6 +1083,13 @@
           });
           console.error(`❌ Failed to send to ${contact.email}:`, error);
 
+          // Log email send failure
+          logger.error('email', `Failed to send email to ${contact.name}`, {
+            to: contact.email,
+            error: error.message,
+            position: `${i + 1} of ${contacts.length}`
+          });
+
           // Mark contact as failed in the store
           emailSendingProgress.markFailed(contact.id);
 
@@ -549,6 +1109,13 @@
           }
         }
       }
+
+      // Log completion
+      logger.info('email', 'Email sending batch completed', {
+        total: contacts.length,
+        success: results.success,
+        failed: results.failed
+      });
 
       // Show results
       let message = `Email sending complete!\n\n`;
@@ -575,6 +1142,13 @@
 
     } catch (error) {
       console.error('Failed to send emails:', error);
+
+      // Log critical error
+      logger.error('email', 'Email sending batch failed', {
+        error: error.message,
+        stack: error.stack
+      });
+
       alert(`Failed to send emails: ${error.message}\n\nPlease check the console for details.`);
 
       // Reset visual indicators after error
@@ -604,6 +1178,10 @@
    * Save as draft
    */
   function saveDraft() {
+    // Close parameter dropdown if open
+    showParamDropdown = false;
+    activeInputElement = null;
+
     console.log('Saving draft...');
     alert('Draft saved! (Note: Draft functionality not yet implemented)');
   }
@@ -677,7 +1255,7 @@
             id="email-subject"
             type="text"
             bind:value={subject}
-            oninput={(e) => handleInput(e, 'subject')}
+            oninput={handleInput}
             onkeydown={handleParamKeydown}
             placeholder="Email subject"
             class="field-input"
@@ -721,13 +1299,63 @@
           </svg>
         </button>
         <div class="toolbar-divider"></div>
+        <button class="toolbar-btn" onclick={openLayoutModal} title="Insert two-column layout" aria-label="Insert two-column layout">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <line x1="12" y1="3" x2="12" y2="21"></line>
+          </svg>
+        </button>
+        <button class="toolbar-btn" onclick={openButtonModal} title="Insert custom button" aria-label="Insert custom button">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="8" width="18" height="8" rx="2" ry="2"></rect>
+            <path d="M12 8v8"></path>
+          </svg>
+        </button>
+        <button class="toolbar-btn" onclick={openUnsubscribeModal} title="Insert unsubscribe button" aria-label="Insert unsubscribe button">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 6h18"></path>
+            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+            <line x1="10" y1="11" x2="10" y2="17"></line>
+            <line x1="14" y1="11" x2="14" y2="17"></line>
+          </svg>
+        </button>
+        <div class="toolbar-divider"></div>
+        <label class="toolbar-btn" title="Insert image">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+            <polyline points="21 15 16 10 5 21"></polyline>
+          </svg>
+          <input
+            type="file"
+            accept="image/*"
+            onchange={handleImageInsertion}
+            style="display: none;"
+          />
+        </label>
+        <label class="toolbar-btn" title="Import HTML file">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+            <polyline points="10 9 9 9 8 9"></polyline>
+          </svg>
+          <input
+            type="file"
+            accept=".html,.htm"
+            onchange={handleHTMLImport}
+            style="display: none;"
+          />
+        </label>
         <label class="toolbar-btn" title="Attach file">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
           </svg>
-          <input 
-            type="file" 
-            multiple 
+          <input
+            type="file"
+            multiple
             onchange={handleFileAttachment}
             style="display: none;"
           />
@@ -738,7 +1366,7 @@
         class="email-body-editor"
         contenteditable="true"
         bind:innerHTML={body}
-        oninput={(e) => handleInput(e, 'body')}
+        oninput={handleInput}
         onkeyup={updateFormattingState}
         onkeydown={handleParamKeydown}
         onclick={updateFormattingState}
@@ -848,6 +1476,559 @@
     </div>
   {/if}
 </div>
+
+{#if showButtonModal}
+  <div
+    class="modal-backdrop"
+    onclick={(e) => e.target === e.currentTarget && closeButtonModal()}
+    onkeydown={(e) => e.key === 'Escape' && closeButtonModal()}
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+  >
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Insert Custom Button</h3>
+        <button class="modal-close-btn" onclick={closeButtonModal} aria-label="Close modal">
+          <X size={20} />
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="button-text">Button Text</label>
+          <input
+            id="button-text"
+            type="text"
+            bind:value={buttonConfig.text}
+            placeholder="Click Here"
+            class="modal-input"
+          />
+        </div>
+
+        <div class="form-group">
+          <label for="button-url">Button URL</label>
+          <input
+            id="button-url"
+            type="url"
+            bind:value={buttonConfig.url}
+            placeholder="https://example.com"
+            class="modal-input"
+          />
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="button-bg-color">Background Color</label>
+            <div class="color-input-wrapper">
+              <input
+                id="button-bg-color"
+                type="color"
+                bind:value={buttonConfig.backgroundColor}
+                class="color-input"
+              />
+              <input
+                type="text"
+                bind:value={buttonConfig.backgroundColor}
+                placeholder="#0066ff"
+                class="color-text-input"
+              />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="button-text-color">Text Color</label>
+            <div class="color-input-wrapper">
+              <input
+                id="button-text-color"
+                type="color"
+                bind:value={buttonConfig.textColor}
+                class="color-input"
+              />
+              <input
+                type="text"
+                bind:value={buttonConfig.textColor}
+                placeholder="#ffffff"
+                class="color-text-input"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="button-padding">Padding</label>
+            <input
+              id="button-padding"
+              type="text"
+              bind:value={buttonConfig.padding}
+              placeholder="12px 24px"
+              class="modal-input"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="button-border-radius">Border Radius</label>
+            <input
+              id="button-border-radius"
+              type="text"
+              bind:value={buttonConfig.borderRadius}
+              placeholder="8px"
+              class="modal-input"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="button-font-size">Font Size</label>
+            <input
+              id="button-font-size"
+              type="text"
+              bind:value={buttonConfig.fontSize}
+              placeholder="16px"
+              class="modal-input"
+            />
+          </div>
+        </div>
+
+        <div class="button-preview">
+          <p class="preview-label">Preview:</p>
+          <div style="text-align: center; padding: 20px; background: #f5f5f5; border-radius: 8px;">
+            <a href={buttonConfig.url}
+               style="display: inline-block;
+                      background-color: {buttonConfig.backgroundColor};
+                      color: {buttonConfig.textColor};
+                      padding: {buttonConfig.padding};
+                      text-decoration: none;
+                      border-radius: {buttonConfig.borderRadius};
+                      font-size: {buttonConfig.fontSize};
+                      font-weight: 600;">
+              {buttonConfig.text}
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick={closeButtonModal}>Cancel</button>
+        <button class="btn-primary" onclick={insertCustomButton}>Insert Button</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showUnsubscribeModal}
+  <div
+    class="modal-backdrop"
+    onclick={(e) => e.target === e.currentTarget && closeUnsubscribeModal()}
+    onkeydown={(e) => e.key === 'Escape' && closeUnsubscribeModal()}
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+  >
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Insert Unsubscribe Button</h3>
+        <button class="modal-close-btn" onclick={closeUnsubscribeModal} aria-label="Close modal">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="unsub-text">Button Text</label>
+          <input
+            id="unsub-text"
+            type="text"
+            bind:value={unsubscribeConfig.text}
+            placeholder="Unsubscribe"
+            class="modal-input"
+          />
+        </div>
+
+        <div class="form-group">
+          <label for="unsub-url">Unsubscribe URL</label>
+          <input
+            id="unsub-url"
+            type="url"
+            bind:value={unsubscribeConfig.url}
+            placeholder="https://example.com/unsubscribe"
+            class="modal-input"
+          />
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="unsub-bg-color">Background Color</label>
+            <div class="color-input-wrapper">
+              <input
+                id="unsub-bg-color"
+                type="color"
+                bind:value={unsubscribeConfig.backgroundColor}
+                class="color-input"
+              />
+              <input
+                type="text"
+                bind:value={unsubscribeConfig.backgroundColor}
+                placeholder="#666666"
+                class="color-text-input"
+              />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="unsub-text-color">Text Color</label>
+            <div class="color-input-wrapper">
+              <input
+                id="unsub-text-color"
+                type="color"
+                bind:value={unsubscribeConfig.textColor}
+                class="color-input"
+              />
+              <input
+                type="text"
+                bind:value={unsubscribeConfig.textColor}
+                placeholder="#ffffff"
+                class="color-text-input"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="unsub-padding">Padding</label>
+            <input
+              id="unsub-padding"
+              type="text"
+              bind:value={unsubscribeConfig.padding}
+              placeholder="8px 16px"
+              class="modal-input"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="unsub-border-radius">Border Radius</label>
+            <input
+              id="unsub-border-radius"
+              type="text"
+              bind:value={unsubscribeConfig.borderRadius}
+              placeholder="4px"
+              class="modal-input"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="unsub-font-size">Font Size</label>
+            <input
+              id="unsub-font-size"
+              type="text"
+              bind:value={unsubscribeConfig.fontSize}
+              placeholder="14px"
+              class="modal-input"
+            />
+          </div>
+        </div>
+
+        <div class="button-preview">
+          <p class="preview-label">Preview:</p>
+          <div style="padding: 20px; background: #f5f5f5; border-radius: 8px;">
+            <p style="color: #888; font-size: 12px; margin-bottom: 10px; text-align: center;">
+              Don't want to receive these emails anymore?
+            </p>
+            <div style="text-align: center;">
+              <a href={unsubscribeConfig.url}
+                 style="display: inline-block;
+                        background-color: {unsubscribeConfig.backgroundColor};
+                        color: {unsubscribeConfig.textColor};
+                        padding: {unsubscribeConfig.padding};
+                        text-decoration: none;
+                        border-radius: {unsubscribeConfig.borderRadius};
+                        font-size: {unsubscribeConfig.fontSize};
+                        font-weight: 500;">
+                {unsubscribeConfig.text}
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick={closeUnsubscribeModal}>Cancel</button>
+        <button class="btn-primary" onclick={insertUnsubscribeButton}>Insert Unsubscribe</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Two-Column Layout Modal -->
+{#if showLayoutModal}
+  <div
+    class="modal-backdrop"
+    onclick={(e) => e.target === e.currentTarget && closeLayoutModal()}
+    onkeydown={(e) => e.key === 'Escape' && closeLayoutModal()}
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+  >
+    <div class="modal-content" role="document">
+      <div class="modal-header">
+        <h3>Insert Two-Section Layout</h3>
+        <button class="modal-close-btn" onclick={closeLayoutModal} aria-label="Close modal">
+          ✕
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="layout-left-content">Top Section Content (optional):</label>
+          <textarea
+            id="layout-left-content"
+            bind:value={layoutConfig.leftContent}
+            placeholder="Enter HTML or text for top section (leave empty to use button)"
+            class="modal-input layout-textarea"
+            rows="3"
+          ></textarea>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="layout-left-button-type">Top Section Button:</label>
+            <select id="layout-left-button-type" bind:value={layoutConfig.leftButtonType} class="modal-input">
+              <option value="none">No Button</option>
+              <option value="link">Link Button</option>
+              <option value="unsubscribe">Unsubscribe Button</option>
+            </select>
+          </div>
+
+          {#if layoutConfig.leftButtonType !== 'none'}
+            <div class="form-group">
+              <label for="layout-left-button-text">Button Text:</label>
+              <input
+                id="layout-left-button-text"
+                type="text"
+                bind:value={layoutConfig.leftButtonText}
+                placeholder="Button text"
+                class="modal-input"
+              />
+            </div>
+          {/if}
+        </div>
+
+        {#if layoutConfig.leftButtonType !== 'none'}
+          <div class="form-row">
+            <div class="form-group">
+              <label for="layout-left-button-url">Button URL:</label>
+              <input
+                id="layout-left-button-url"
+                type="text"
+                bind:value={layoutConfig.leftButtonUrl}
+                placeholder="https://example.com"
+                class="modal-input"
+              />
+            </div>
+
+            <div class="form-group">
+              <label for="layout-left-button-bg">Background Color:</label>
+              <div class="color-input-wrapper">
+                <input
+                  id="layout-left-button-bg"
+                  type="color"
+                  bind:value={layoutConfig.leftButtonBg}
+                  class="color-input"
+                />
+                <input
+                  type="text"
+                  bind:value={layoutConfig.leftButtonBg}
+                  placeholder="#0066ff"
+                  class="color-text-input"
+                />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="layout-left-button-color">Text Color:</label>
+              <div class="color-input-wrapper">
+                <input
+                  id="layout-left-button-color"
+                  type="color"
+                  bind:value={layoutConfig.leftButtonColor}
+                  class="color-input"
+                />
+                <input
+                  type="text"
+                  bind:value={layoutConfig.leftButtonColor}
+                  placeholder="#ffffff"
+                  class="color-text-input"
+                />
+              </div>
+            </div>
+          </div>
+        {/if}
+
+        <div class="form-group">
+          <label for="layout-right-content">Bottom Section Content (optional):</label>
+          <textarea
+            id="layout-right-content"
+            bind:value={layoutConfig.rightContent}
+            placeholder="Enter HTML or text for bottom section (leave empty to use button)"
+            class="modal-input layout-textarea"
+            rows="3"
+          ></textarea>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="layout-right-button-type">Bottom Section Button:</label>
+            <select id="layout-right-button-type" bind:value={layoutConfig.rightButtonType} class="modal-input">
+              <option value="none">No Button</option>
+              <option value="link">Link Button</option>
+              <option value="unsubscribe">Unsubscribe Button</option>
+            </select>
+          </div>
+
+          {#if layoutConfig.rightButtonType !== 'none'}
+            <div class="form-group">
+              <label for="layout-right-button-text">Button Text:</label>
+              <input
+                id="layout-right-button-text"
+                type="text"
+                bind:value={layoutConfig.rightButtonText}
+                placeholder="Button text"
+                class="modal-input"
+              />
+            </div>
+          {/if}
+        </div>
+
+        {#if layoutConfig.rightButtonType !== 'none'}
+          <div class="form-row">
+            <div class="form-group">
+              <label for="layout-right-button-url">Button URL:</label>
+              <input
+                id="layout-right-button-url"
+                type="text"
+                bind:value={layoutConfig.rightButtonUrl}
+                placeholder="https://example.com"
+                class="modal-input"
+              />
+            </div>
+
+            <div class="form-group">
+              <label for="layout-right-button-bg">Background Color:</label>
+              <div class="color-input-wrapper">
+                <input
+                  id="layout-right-button-bg"
+                  type="color"
+                  bind:value={layoutConfig.rightButtonBg}
+                  class="color-input"
+                />
+                <input
+                  type="text"
+                  bind:value={layoutConfig.rightButtonBg}
+                  placeholder="#666666"
+                  class="color-text-input"
+                />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="layout-right-button-color">Text Color:</label>
+              <div class="color-input-wrapper">
+                <input
+                  id="layout-right-button-color"
+                  type="color"
+                  bind:value={layoutConfig.rightButtonColor}
+                  class="color-input"
+                />
+                <input
+                  type="text"
+                  bind:value={layoutConfig.rightButtonColor}
+                  placeholder="#ffffff"
+                  class="color-text-input"
+                />
+              </div>
+            </div>
+          </div>
+        {/if}
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="layout-left-align">Top Section Alignment:</label>
+            <select id="layout-left-align" bind:value={layoutConfig.leftAlign} class="modal-input">
+              <option value="left">Left</option>
+              <option value="center">Center</option>
+              <option value="right">Right</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="layout-right-align">Bottom Section Alignment:</label>
+            <select id="layout-right-align" bind:value={layoutConfig.rightAlign} class="modal-input">
+              <option value="left">Left</option>
+              <option value="center">Center</option>
+              <option value="right">Right</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="layout-padding">Padding:</label>
+          <input
+            id="layout-padding"
+            type="text"
+            bind:value={layoutConfig.padding}
+            placeholder="e.g., 20px 0"
+            class="modal-input"
+          />
+        </div>
+
+        <div class="button-preview">
+          <p class="preview-label">Preview:</p>
+          <div style="background: #fff; padding: 20px; border-radius: 8px;">
+            <table style="width: 100%; border-collapse: collapse;" cellpadding="0" cellspacing="0">
+              <tbody>
+                <tr>
+                  <td style="width: 100%; padding: 10px; text-align: {layoutConfig.leftAlign}; border: 1px dashed #ccc;">
+                    {#if layoutConfig.leftContent}
+                      {@html layoutConfig.leftContent}
+                    {:else if layoutConfig.leftButtonType === 'link'}
+                      {@html generateButtonHTML(layoutConfig.leftButtonType, layoutConfig.leftButtonText, layoutConfig.leftButtonUrl, layoutConfig.leftButtonBg, layoutConfig.leftButtonColor)}
+                    {:else if layoutConfig.leftButtonType === 'unsubscribe'}
+                      {@html generateButtonHTML(layoutConfig.leftButtonType, layoutConfig.leftButtonText, layoutConfig.leftButtonUrl, layoutConfig.leftButtonBg, layoutConfig.leftButtonColor)}
+                    {:else}
+                      <p style="color: #888; font-style: italic;">Top section content</p>
+                    {/if}
+                  </td>
+                </tr>
+                <tr>
+                  <td style="width: 100%; padding: 10px; text-align: {layoutConfig.rightAlign}; border: 1px dashed #ccc;">
+                    {#if layoutConfig.rightContent}
+                      {@html layoutConfig.rightContent}
+                    {:else if layoutConfig.rightButtonType === 'link'}
+                      {@html generateButtonHTML(layoutConfig.rightButtonType, layoutConfig.rightButtonText, layoutConfig.rightButtonUrl, layoutConfig.rightButtonBg, layoutConfig.rightButtonColor)}
+                    {:else if layoutConfig.rightButtonType === 'unsubscribe'}
+                      {@html generateButtonHTML(layoutConfig.rightButtonType, layoutConfig.rightButtonText, layoutConfig.rightButtonUrl, layoutConfig.rightButtonBg, layoutConfig.rightButtonColor)}
+                    {:else}
+                      <p style="color: #888; font-style: italic;">Bottom section content</p>
+                    {/if}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick={closeLayoutModal}>Cancel</button>
+        <button class="btn-primary" onclick={insertLayout}>Insert Layout</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .email-composer {
@@ -1433,6 +2614,235 @@
       transform: translateY(0);
       opacity: 1;
     }
+  }
+
+  /* Modal styles */
+  .modal-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    animation: fadeIn 0.2s ease-out;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  .modal-content {
+    background-color: #2a2a2a;
+    border-radius: 12px;
+    width: 90%;
+    max-width: 600px;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    animation: slideUp 0.3s ease-out;
+  }
+
+  @keyframes slideUp {
+    from {
+      transform: translateY(50px);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+
+  .modal-header {
+    padding: 24px;
+    border-bottom: 1px solid #444;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .modal-header h3 {
+    margin: 0;
+    color: #fff;
+    font-size: 1.3rem;
+    font-weight: 600;
+  }
+
+  .modal-close-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    border: none;
+    background-color: transparent;
+    color: #888;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    padding: 0;
+  }
+
+  .modal-close-btn:hover {
+    background-color: #ff4444;
+    color: #fff;
+  }
+
+  .modal-body {
+    padding: 24px;
+  }
+
+  .form-group {
+    margin-bottom: 20px;
+  }
+
+  .form-group label {
+    display: block;
+    margin-bottom: 8px;
+    color: #aaa;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+
+  .modal-input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #444;
+    border-radius: 6px;
+    background-color: #1e1e1e;
+    color: #fff;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.2s;
+    box-sizing: border-box;
+  }
+
+  .modal-input:focus {
+    border-color: #0066ff;
+  }
+
+  .layout-textarea {
+    resize: vertical;
+    min-height: 80px;
+    font-family: 'Courier New', monospace;
+  }
+
+  .form-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 16px;
+  }
+
+  .color-input-wrapper {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .color-input {
+    width: 50px;
+    height: 40px;
+    border: 1px solid #444;
+    border-radius: 6px;
+    background-color: #1e1e1e;
+    cursor: pointer;
+    padding: 4px;
+  }
+
+  .color-text-input {
+    flex: 1;
+    padding: 10px 12px;
+    border: 1px solid #444;
+    border-radius: 6px;
+    background-color: #1e1e1e;
+    color: #fff;
+    font-size: 0.9rem;
+    outline: none;
+    transition: border-color 0.2s;
+    font-family: 'Courier New', monospace;
+  }
+
+  .color-text-input:focus {
+    border-color: #0066ff;
+  }
+
+  .button-preview {
+    margin-top: 24px;
+    padding-top: 24px;
+    border-top: 1px solid #444;
+  }
+
+  .preview-label {
+    margin: 0 0 12px 0;
+    color: #aaa;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+
+  .modal-footer {
+    padding: 20px 24px;
+    border-top: 1px solid #444;
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+  }
+
+  /* Custom scrollbar for modal */
+  .modal-content::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .modal-content::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .modal-content::-webkit-scrollbar-thumb {
+    background: #444;
+    border-radius: 4px;
+  }
+
+  .modal-content::-webkit-scrollbar-thumb:hover {
+    background: #555;
+  }
+
+  /* Resizable image styles */
+  :global(.email-body-editor img.resizable-image) {
+    transition: border-color 0.2s;
+    user-select: none;
+    position: relative;
+  }
+
+  :global(.email-body-editor img.resizable-image:hover) {
+    border-color: #0066ff !important;
+    box-shadow: 0 0 0 1px rgba(0, 102, 255, 0.3);
+  }
+
+  :global(.email-body-editor img.resizable-image.resizing) {
+    border-color: #0066ff !important;
+    opacity: 0.8;
+    box-shadow: 0 0 0 2px rgba(0, 102, 255, 0.5);
+  }
+
+  /* Resize corner indicator */
+  :global(.email-body-editor img.resizable-image:hover::after) {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 20px;
+    height: 20px;
+    background: linear-gradient(135deg, transparent 50%, #0066ff 50%);
+    cursor: nwse-resize;
+    pointer-events: none;
   }
 </style>
 

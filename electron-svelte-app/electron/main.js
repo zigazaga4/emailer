@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { sendEmail } from './zoho-api.js';
+import { sendEmail } from './email-handler.js';
 import {
   sendWhatsAppMessage,
   fetchMessage,
@@ -9,6 +9,7 @@ import {
   getTwilioConfig,
   updateTwilioConfig
 } from './twilio-api.js';
+import logger from './logger.js';
 
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -36,6 +37,9 @@ const isDevelopment = process.env.NODE_ENV === 'development';
  * Configures window properties and loads the appropriate content
  */
 function createWindow() {
+  console.log('[Main] Creating window...');
+  console.log('[Main] isDevelopment:', isDevelopment);
+
   // Create the browser window with specified dimensions and properties
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -52,40 +56,49 @@ function createWindow() {
     },
     // Ensure proper rendering on all platforms
     backgroundColor: '#1e1e1e',
-    show: false,
+    show: true,
   });
 
-  // Show window when ready to prevent visual flash
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-  });
+  console.log('[Main] Window created and shown');
 
   // Load the appropriate URL based on environment
   if (isDevelopment) {
     // In development, load from Vite dev server
-    mainWindow.loadURL('http://localhost:5173');
+    const devUrl = 'http://localhost:5770';
+    console.log('[Main] Loading dev URL:', devUrl);
+    mainWindow.loadURL(devUrl).catch(err => {
+      console.error('[Main] Failed to load URL:', err);
+    });
     // Open DevTools automatically in development
     mainWindow.webContents.openDevTools();
   } else {
     // In production, load the built index.html file
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    const indexPath = path.join(__dirname, '../dist/index.html');
+    console.log('[Main] Loading file:', indexPath);
+    mainWindow.loadFile(indexPath);
   }
 
   // Handle window closed event
   mainWindow.on('closed', () => {
+    console.log('[Main] Window closed');
     mainWindow = null;
+  });
+
+  // Log any load errors
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+    console.error('[Main] Failed to load:', errorCode, errorDescription);
   });
 }
 
 /**
- * Setup IPC handlers for Zoho API and Twilio WhatsApp API
+ * Setup IPC handlers for Email API and Twilio WhatsApp API
  */
 function setupIPCHandlers() {
-  // Zoho Email API handlers
-  ipcMain.handle('zoho:sendEmail', async (_event, emailData) => {
+  // Email API handler - supports both Zoho and cPanel
+  ipcMain.handle('zoho:sendEmail', async (_event, emailData, settings) => {
     try {
       console.log('[Main] Received sendEmail request');
-      const result = await sendEmail(emailData);
+      const result = await sendEmail(emailData, settings);
       return { success: true, data: result };
     } catch (error) {
       console.error('[Main] sendEmail error:', error);
@@ -154,13 +167,63 @@ function setupIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
+
+  // Logger API handlers
+
+  // Log from renderer process
+  ipcMain.handle('logs:log', async (_event, level, category, message, details) => {
+    try {
+      logger.log(level, category, message, details);
+      return { success: true };
+    } catch (error) {
+      console.error('[Main] log error:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Get logs
+  ipcMain.handle('logs:get', async (_event, options) => {
+    try {
+      const logs = logger.getLogs(options);
+      return { success: true, data: logs };
+    } catch (error) {
+      console.error('[Main] getLogs error:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Get log statistics
+  ipcMain.handle('logs:getStats', async (_event) => {
+    try {
+      const stats = logger.getStats();
+      return { success: true, data: stats };
+    } catch (error) {
+      console.error('[Main] getStats error:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Clear old logs
+  ipcMain.handle('logs:clearOld', async (_event, daysToKeep) => {
+    try {
+      const count = logger.clearOldLogs(daysToKeep);
+      return { success: true, data: count };
+    } catch (error) {
+      console.error('[Main] clearOldLogs error:', error);
+      return { success: false, error: error.message };
+    }
+  });
 }
 
 /**
  * App ready event handler
  * Creates the main window when Electron has finished initialization
  */
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Initialize logger (must await since it's async)
+  await logger.initialize();
+  logger.info('system', 'Application started');
+
   setupIPCHandlers();
   createWindow();
 
@@ -182,3 +245,11 @@ app.on('window-all-closed', () => {
   }
 });
 
+/**
+ * App quit event handler
+ * Clean up resources before quitting
+ */
+app.on('before-quit', () => {
+  logger.info('system', 'Application shutting down');
+  logger.close();
+});
