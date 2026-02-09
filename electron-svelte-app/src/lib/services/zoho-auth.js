@@ -5,13 +5,13 @@
 
 import https from 'https';
 
-// Zoho API credentials
+// Zoho API credentials for office@justhemis.com
 const ZOHO_CONFIG = {
-  clientId: '1000.EYMFVWB0IBLK1GCDDM75VKL4ZWT0OV',
-  clientSecret: 'a70e76555d6b5fe8adcf9dfdd7736f2f5bde568fd9',
-  refreshToken: '1000.9f02913cd8800924dca98b78763b35e5.4e0361a53f684aaf2fa28bb83039d9c1',
-  accountId: '7153061000000002002',
-  senderEmail: 'noreply@justhemis.com',
+  clientId: '1000.LW4UDAYY1JRRXB0NANAUTMSTTDXGBN',
+  clientSecret: '1ba3eb51491b523c963afc0587dd9475712c667405',
+  refreshToken: '1000.cc22315386cd2d28efccf8692fbd876a.61144f5c943828e0b64f2abaf2db1afd',
+  accountId: '7827310000000002002',
+  senderEmail: 'office@justhemis.com',
   apiDomain: 'https://mail.zoho.eu',
   authDomain: 'https://accounts.zoho.eu'
 };

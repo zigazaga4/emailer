@@ -1,20 +1,47 @@
 /**
  * Zoho API Handler for Electron Main Process
  * Handles all Zoho Mail API calls without CORS restrictions
+ *
+ * ⚠️ DEPRECATED: This file is no longer used by the application.
+ * The app has been switched to use Zoho SMTP instead of the Zoho Mail API
+ * to support custom display names for email aliases.
+ *
+ * See: electron/email-handler.js for the current SMTP implementation
+ * See: ZOHO_SMTP_SETUP.md for setup instructions
+ *
+ * This file is kept for reference only.
  */
 
 import https from 'https';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-// Zoho API credentials for justhemis@justhemis.com
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load environment variables
+dotenv.config({ path: path.join(__dirname, '../.env') });
+
+// Zoho API credentials for office@justhemis.com
 const ZOHO_CONFIG = {
-  clientId: '1000.V1289BLO94K3R022OOI8NEACL8MDQD',
-  clientSecret: '43d539d3a230b2ada5010d628936007d1dedb5e613',
-  refreshToken: '1000.b4f230bb556f40fe1f2f08127af394e3.c5d5de1bca61f4877a74b1985f0f9a80',
-  accountId: '7578861000000002002',
-  senderEmail: 'justhemis@justhemis.com',
+  clientId: process.env.ZOHO_CLIENT_ID,
+  clientSecret: process.env.ZOHO_CLIENT_SECRET,
+  refreshToken: process.env.ZOHO_REFRESH_TOKEN,
+  accountId: process.env.ZOHO_ACCOUNT_ID,
+  senderEmail: 'office@justhemis.com',
   apiDomain: 'https://mail.zoho.eu',
   authDomain: 'https://accounts.zoho.eu'
 };
+
+// Available email aliases for sending
+const EMAIL_ALIASES = [
+  { value: 'office@justhemis.com', label: 'Main Office (office@justhemis.com)' },
+  { value: 'uk@justhemis.com', label: 'UK Office (uk@justhemis.com)' },
+  { value: 'usa@justhemis.com', label: 'USA Office (usa@justhemis.com)' },
+  { value: 'canada@justhemis.com', label: 'Canada Office (canada@justhemis.com)' },
+  { value: 'australia@justhemis.com', label: 'Australia Office (australia@justhemis.com)' }
+];
 
 // Token storage
 let accessToken = null;
@@ -265,11 +292,16 @@ function buildMultipartBody(fields, files, inlineImages = []) {
 /**
  * Send email via Zoho Mail API
  * @param {Object} emailData - Email data
+ * @param {string} fromAddress - Email address to send from (optional, defaults to main office)
  * @returns {Promise<Object>} API response
  */
-export async function sendEmail(emailData) {
+export async function sendEmail(emailData, fromAddress = null) {
   try {
+    // Use provided fromAddress or default to main office email
+    const senderEmail = fromAddress || ZOHO_CONFIG.senderEmail;
+
     console.log('[Main] Sending email via Zoho Mail API...');
+    console.log('[Main] From:', senderEmail);
     console.log('[Main] To:', emailData.to);
     console.log('[Main] Subject:', emailData.subject);
 
@@ -277,20 +309,20 @@ export async function sendEmail(emailData) {
     const token = await getValidAccessToken();
 
     // Extract inline images from HTML
-    const { html: processedHtml, inlineImages } = extractInlineImages(emailData.body);
+    const { html: processedHtml, imageAttachments } = extractInlineImages(emailData.body);
 
     // If there are inline images or attachments, use multipart
-    if ((emailData.attachments && emailData.attachments.length > 0) || inlineImages.length > 0) {
+    if ((emailData.attachments && emailData.attachments.length > 0) || imageAttachments.length > 0) {
       const modifiedEmailData = {
         ...emailData,
         body: processedHtml
       };
-      return await sendEmailWithAttachments(modifiedEmailData, token, inlineImages);
+      return await sendEmailWithAttachments(modifiedEmailData, token, imageAttachments, senderEmail);
     }
 
     // Build request body
     const requestBody = {
-      fromAddress: ZOHO_CONFIG.senderEmail,
+      fromAddress: senderEmail,
       toAddress: emailData.to,
       subject: emailData.subject,
       content: processedHtml,
@@ -343,10 +375,14 @@ export async function sendEmail(emailData) {
  * @param {Object} emailData - Email data
  * @param {string} token - Access token
  * @param {Array} inlineImages - Inline images with CID
+ * @param {string} fromAddress - Email address to send from
  * @returns {Promise<Object>} API response
  */
-async function sendEmailWithAttachments(emailData, token, inlineImages = []) {
+async function sendEmailWithAttachments(emailData, token, inlineImages = [], fromAddress = null) {
+  const senderEmail = fromAddress || ZOHO_CONFIG.senderEmail;
+
   console.log('[Main] Sending email with attachments...');
+  console.log('[Main] From:', senderEmail);
   if (emailData.attachments && emailData.attachments.length > 0) {
     console.log('[Main] Attachments:', emailData.attachments.map(f => f.name).join(', '));
   }
@@ -356,7 +392,7 @@ async function sendEmailWithAttachments(emailData, token, inlineImages = []) {
 
   // Prepare form fields
   const fields = {
-    fromAddress: ZOHO_CONFIG.senderEmail,
+    fromAddress: senderEmail,
     toAddress: emailData.to,
     subject: emailData.subject,
     content: emailData.body,
@@ -430,3 +466,5 @@ async function sendEmailWithAttachments(emailData, token, inlineImages = []) {
   });
 }
 
+// Export EMAIL_ALIASES for use in UI
+export { EMAIL_ALIASES };

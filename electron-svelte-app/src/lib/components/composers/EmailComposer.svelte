@@ -4,16 +4,40 @@
    * Full-featured email composition interface with rich text editing
    */
 
-  import { X } from 'lucide-svelte';
+  import { onMount } from 'svelte';
+  import { X, AtSign } from 'lucide-svelte';
   import { sendEmail as sendEmailViaIPC } from '../../services/zoho-ipc.js';
+  import RichTextEditor from '../editors/RichTextEditor.svelte';
   import { contactsStore, getContactsInList, listsStore, listMembershipsVersion } from '../../stores/database.js';
   import { emailSendingProgress } from '../../stores/emailSendingStore.js';
+  import { emailTabsStore } from '../../stores/emailTabsStore.js';
+  import { templatesStore } from '../../stores/templatesStore.js';
+  import { emailSessionsStore, emailLogsStore } from '../../stores/emailSessionsStore.js';
   import logger from '../../services/logger-ipc.js';
+  import { toastSuccess, toastError, toastWarning, toastInfo } from '../../stores/toastStore.js';
+  import { confirm as confirmDialog, prompt as promptDialog } from '../../stores/dialogStore.js';
 
   /**
    * Component props
    */
-  let { selectedListId = null } = $props();
+  let {
+    tabId = 'default',
+    selectedListId = null,
+    isTemplateMode = false,
+    subject: templateSubject = $bindable(''),
+    body: templateBody = $bindable(''),
+    fromAddress: templateFromAddress = $bindable('office@justhemis.com'),
+    availableTemplates = []
+  } = $props();
+
+  /**
+   * Get current tab's from address from the tab store
+   */
+  let currentFromAddress = $derived.by(() => {
+    if (isTemplateMode) return templateFromAddress;
+    const tab = $emailTabsStore.tabs.find(t => t.id === tabId);
+    return tab?.fromAddress || 'office@justhemis.com';
+  });
 
   /**
    * Email form state
@@ -23,10 +47,39 @@
   let attachments = $state([]);
 
   /**
+   * RichTextEditor component reference
+   */
+  let richTextEditorRef = $state(null);
+
+  /**
+   * Sync template values with local state
+   */
+  $effect(() => {
+    if (isTemplateMode) {
+      subject = templateSubject;
+      body = templateBody;
+    }
+  });
+
+  $effect(() => {
+    if (isTemplateMode) {
+      templateSubject = subject;
+      templateBody = body;
+    }
+  });
+
+  /**
+   * Templates state - use passed templates or load from store
+   */
+  let templates = $derived(availableTemplates.length > 0 ? availableTemplates : $templatesStore);
+  let selectedTemplateId = $state(null);
+
+  /**
    * UI state
    */
   let isSending = $state(false);
   let showPreview = $state(false);
+  let showFromAddressSelector = $state(false);
   let sendingProgress = $state({ current: 0, total: 0, currentEmail: '' });
 
   /**
@@ -126,6 +179,32 @@
       }, 100);
     }
   });
+
+  /**
+   * Load templates on mount (only if not using passed templates)
+   */
+  onMount(async () => {
+    if (availableTemplates.length === 0) {
+      await templatesStore.loadTemplates();
+    }
+  });
+
+  /**
+   * Load a template into the composer
+   */
+  function loadTemplate(templateId) {
+    const template = templates.find(t => t.id === templateId);
+    if (!template) return;
+
+    subject = template.subject;
+    body = template.body;
+    selectedTemplateId = templateId;
+
+    // Update RichTextEditor content
+    if (richTextEditorRef) {
+      richTextEditorRef.setHTML(template.body);
+    }
+  }
 
   /**
    * Replace parameters in text with actual contact data
@@ -315,43 +394,67 @@
       }
     } else if (isBody) {
       // Handle body contenteditable with highlighting
-      const text = element.textContent || '';
-      const cursorPos = getCaretPosition(element);
-      const beforeCursor = text.substring(0, cursorPos);
-      const match = beforeCursor.match(/\{([^}]*?)$/);
+      // Use Selection API to preserve HTML formatting
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0) return;
+
+      const range = selection.getRangeAt(0);
+
+      // Get text before cursor to find the { trigger
+      const preCaretRange = range.cloneRange();
+      preCaretRange.selectNodeContents(element);
+      preCaretRange.setEnd(range.startContainer, range.startOffset);
+      const textBeforeCursor = preCaretRange.toString();
+
+      // Find the { that triggered the dropdown
+      const match = textBeforeCursor.match(/\{([^}]*?)$/);
 
       if (match) {
-        const startPos = cursorPos - match[0].length;
-        const afterCursor = text.substring(cursorPos);
+        const triggerLength = match[0].length;
+        const node = range.startContainer;
+        const offset = range.startOffset;
 
-        // Create highlighted HTML with a space after to prevent formatting bleed
-        const beforeText = text.substring(0, startPos);
-        const highlightedParam = `<span class="param-highlight">{param(<span class="param-name">${paramName}</span>)}</span>`;
+        // Delete the trigger characters by selecting and deleting them
+        if (node.nodeType === Node.TEXT_NODE && offset >= triggerLength) {
+          // Select the trigger text
+          range.setStart(node, offset - triggerLength);
+          range.setEnd(node, offset);
+          selection.removeAllRanges();
+          selection.addRange(range);
 
-        // Update body with HTML - add a zero-width space after the span to break formatting
-        element.innerHTML = beforeText + highlightedParam + '\u200B' + afterCursor;
+          // Delete selected text
+          // eslint-disable-next-line deprecation/deprecation
+          document.execCommand('delete', false, null);
+        }
+
+        // Create the parameter span element directly (not as HTML string)
+        const paramSpan = document.createElement('span');
+        paramSpan.className = 'param-highlight';
+        paramSpan.contentEditable = 'false'; // Make span non-editable so cursor can't enter it
+        paramSpan.innerHTML = `{param(<span class="param-name">${paramName}</span>)}`;
+
+        // Insert the span at cursor using insertNode (preserves formatting)
+        const insertRange = selection.getRangeAt(0);
+        insertRange.insertNode(paramSpan);
+
+        // Insert a space after the span using insertAdjacentText (guaranteed outside)
+        paramSpan.insertAdjacentText('afterend', '\u00A0'); // Non-breaking space
+
+        // Find the text node we just created and place cursor there
+        const nextNode = paramSpan.nextSibling;
+        if (nextNode && nextNode.nodeType === Node.TEXT_NODE) {
+          const newRange = document.createRange();
+          newRange.setStart(nextNode, 1);
+          newRange.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(newRange);
+        }
+
+        // Focus the editor
+        element.focus();
+
+        // Update body state
         body = element.innerHTML;
-
-        // Set cursor after inserted parameter (after the zero-width space)
-        setTimeout(() => {
-          // Find the span we just inserted and place cursor after it
-          const spans = element.querySelectorAll('.param-highlight');
-          if (spans.length > 0) {
-            const lastSpan = spans[spans.length - 1];
-
-            // Place cursor after the span and the zero-width space
-            const nextNode = lastSpan.nextSibling;
-            if (nextNode && nextNode.nodeType === Node.TEXT_NODE) {
-              const range = document.createRange();
-              const sel = window.getSelection();
-              range.setStart(nextNode, 1); // After the zero-width space
-              range.collapse(true);
-              sel?.removeAllRanges();
-              sel?.addRange(range);
-            }
-          }
-          element.focus();
-        }, 0);
       }
     }
 
@@ -396,12 +499,40 @@
   }
 
   /**
+   * Check if cursor is inside a heading element
+   * @returns {boolean} True if inside h1-h4
+   */
+  function isInsideHeading() {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return false;
+
+    let node = selection.anchorNode;
+    while (node && node !== document.body) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const element = /** @type {Element} */ (node);
+        const tagName = element.tagName?.toLowerCase();
+        if (['h1', 'h2', 'h3', 'h4'].includes(tagName)) {
+          return true;
+        }
+      }
+      node = node.parentNode;
+    }
+    return false;
+  }
+
+  /**
    * Update formatting button states based on current selection
    * Note: queryCommandState is deprecated but still widely supported with no official replacement
    */
   function updateFormattingState() {
+    // Check if inside heading - headings have inherent bold, so don't show bold as active
+    const inHeading = isInsideHeading();
+
     // eslint-disable-next-line deprecation/deprecation
-    isBold = document.queryCommandState('bold');
+    const queryBold = document.queryCommandState('bold');
+    // Only show bold as active if explicitly bolded (not just heading's inherent bold)
+    isBold = inHeading ? false : queryBold;
+
     // eslint-disable-next-line deprecation/deprecation
     isItalic = document.queryCommandState('italic');
     // eslint-disable-next-line deprecation/deprecation
@@ -409,11 +540,147 @@
   }
 
   /**
+   * Apply heading/block formatting to selected text
+   * Uses formatBlock command with semantic HTML tags
+   * @param {string} tag - HTML tag (h1, h2, h3, h4, p, div)
+   */
+  function applyHeading(tag) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return;
+
+    // For normal text conversion, we need special handling
+    if (tag === 'p') {
+      // First try to remove heading formatting by inserting a new paragraph
+      // Get the current block element
+      let node = selection.anchorNode;
+      while (node && node.nodeType !== Node.ELEMENT_NODE) {
+        node = node.parentNode;
+      }
+
+      // Check if we're inside a heading
+      let headingNode = node;
+      while (headingNode && headingNode !== document.body) {
+        const headingElement = /** @type {Element} */ (headingNode);
+        const tagName = headingElement.tagName?.toLowerCase();
+        if (['h1', 'h2', 'h3', 'h4'].includes(tagName)) {
+          // We're inside a heading - need to break out of it
+          // Insert a line break and then change format
+          // eslint-disable-next-line deprecation/deprecation
+          document.execCommand('insertParagraph', false, null);
+          // eslint-disable-next-line deprecation/deprecation
+          document.execCommand('formatBlock', false, 'div');
+          return;
+        }
+        headingNode = headingNode.parentNode;
+      }
+
+      // Not in a heading, just apply div format
+      // eslint-disable-next-line deprecation/deprecation
+      document.execCommand('formatBlock', false, 'div');
+    } else {
+      // For headings, apply directly
+      // eslint-disable-next-line deprecation/deprecation
+      document.execCommand('formatBlock', false, tag);
+    }
+  }
+
+  /**
+   * Heading dropdown state
+   */
+  let showHeadingDropdown = $state(false);
+
+  /**
+   * Toggle heading dropdown visibility
+   */
+  function toggleHeadingDropdown() {
+    showHeadingDropdown = !showHeadingDropdown;
+  }
+
+  /**
+   * Select heading and close dropdown
+   * @param {string} tag - HTML tag to apply
+   */
+  function selectHeading(tag) {
+    applyHeading(tag);
+    showHeadingDropdown = false;
+  }
+
+  /**
+   * Close heading dropdown when clicking outside
+   * @param {MouseEvent} event - Click event
+   */
+  function handleClickOutsideHeading(event) {
+    if (showHeadingDropdown) {
+      const target = /** @type {Element} */ (event.target);
+      const container = target.closest('.heading-dropdown-container');
+      if (!container) {
+        showHeadingDropdown = false;
+      }
+    }
+  }
+
+  // Add global click listener for heading dropdown
+  $effect(() => {
+    if (typeof document !== 'undefined') {
+      document.addEventListener('click', handleClickOutsideHeading);
+      return () => {
+        document.removeEventListener('click', handleClickOutsideHeading);
+      };
+    }
+  });
+
+  /**
+   * Insert unordered list (bullet points)
+   */
+  function insertBulletList() {
+    // eslint-disable-next-line deprecation/deprecation
+    document.execCommand('insertUnorderedList', false, null);
+  }
+
+  /**
+   * Insert ordered list (numbered)
+   */
+  function insertNumberedList() {
+    // eslint-disable-next-line deprecation/deprecation
+    document.execCommand('insertOrderedList', false, null);
+  }
+
+  /**
+   * Align text left
+   */
+  function alignLeft() {
+    // eslint-disable-next-line deprecation/deprecation
+    document.execCommand('justifyLeft', false, null);
+  }
+
+  /**
+   * Align text center
+   */
+  function alignCenter() {
+    // eslint-disable-next-line deprecation/deprecation
+    document.execCommand('justifyCenter', false, null);
+  }
+
+  /**
+   * Align text right
+   */
+  function alignRight() {
+    // eslint-disable-next-line deprecation/deprecation
+    document.execCommand('justifyRight', false, null);
+  }
+
+  /**
    * Insert link into email body
    * Note: execCommand is deprecated but still widely supported with no official replacement
    */
-  function insertLink() {
-    const url = prompt('Enter URL:');
+  async function insertLink() {
+    const url = await promptDialog('Enter URL:', {
+      title: 'Insert Link',
+      placeholder: 'https://example.com',
+      defaultValue: '',
+      confirmText: 'Insert',
+      cancelText: 'Cancel'
+    });
     if (url) {
       // eslint-disable-next-line deprecation/deprecation
       document.execCommand('createLink', false, url);
@@ -678,7 +945,7 @@
       const file = target.files[0];
 
       if (!file.type.startsWith('image/')) {
-        alert('Please select an image file');
+        toastWarning('Please select an image file');
         return;
       }
 
@@ -734,7 +1001,7 @@
       const file = target.files[0];
 
       if (!file.name.endsWith('.html') && !file.name.endsWith('.htm')) {
-        alert('Please select an HTML file');
+        toastWarning('Please select an HTML file');
         return;
       }
 
@@ -918,12 +1185,12 @@
 
     // Validate form
     if (!subject.trim()) {
-      alert('Please enter a subject');
+      toastWarning('Please enter a subject');
       return;
     }
 
     if (!body.trim()) {
-      alert('Please enter a message');
+      toastWarning('Please enter a message');
       return;
     }
 
@@ -931,16 +1198,16 @@
     const contacts = getTargetContacts();
 
     if (contacts.length === 0) {
-      alert('No contacts found. Please add contacts first.');
+      toastWarning('No contacts found. Please add contacts first.');
       return;
     }
 
     const selectionName = getSelectionDisplayName();
 
-    // Confirm before sending
-    const confirmed = confirm(
-      `Are you sure you want to send this email to ${contacts.length} contact(s) in ${selectionName}?\n\n` +
-      `Emails will be sent with random delays between 50 seconds and 2 minutes.`
+    // Confirm before sending (non-blocking dialog)
+    const confirmed = await confirmDialog(
+      `Are you sure you want to send this email to ${contacts.length} contact(s) in ${selectionName}?\n\nEmails will be sent with random delays between 40 and 70 seconds.`,
+      { title: 'Send Emails', confirmText: 'Send', cancelText: 'Cancel', dangerous: false }
     );
     if (!confirmed) {
       return;
@@ -949,8 +1216,8 @@
     isSending = true;
     sendingProgress = { current: 0, total: contacts.length, currentEmail: '' };
 
-    // Initialize the email sending progress store
-    emailSendingProgress.startSending(selectedListId, contacts.length);
+    // Initialize the email sending progress store with tab ID
+    emailSendingProgress.startSending(tabId, selectedListId, contacts.length);
 
     const results = {
       success: 0,
@@ -958,11 +1225,27 @@
       errors: []
     };
 
+    // Create email session for tracking
+    const selectedList = selectedListId ? $listsStore.find(l => l.id === selectedListId) : null;
+    const selectedTemplate = selectedTemplateId ? templates.find(t => t.id === selectedTemplateId) : null;
+
+    const sessionId = await emailSessionsStore.createSession({
+      sessionName: `${selectionName} - ${new Date().toLocaleString()}`,
+      listId: selectedListId,
+      listName: selectedList?.name || (selectedListId === null ? 'All Contacts' : null),
+      templateId: selectedTemplate?.id || null,
+      templateName: selectedTemplate?.name || null,
+      subject: subject.substring(0, 200),
+      fromAddress: currentFromAddress,
+      totalContacts: contacts.length
+    });
+
     // Log email sending start
     logger.info('email', `Starting email send to ${contacts.length} contacts in ${selectionName}`, {
       contactCount: contacts.length,
       listId: selectedListId,
-      subject: subject.substring(0, 100)
+      subject: subject.substring(0, 100),
+      sessionId
     });
 
     try {
@@ -977,7 +1260,7 @@
         };
 
         // Update store with current contact being sent
-        emailSendingProgress.setCurrentContact(contact.id, i);
+        emailSendingProgress.setCurrentContact(tabId, contact.id, i);
 
         try {
           console.log(`[${i + 1}/${contacts.length}] Sending to ${contact.name} (${contact.email})...`);
@@ -1014,7 +1297,7 @@
             });
 
             // Mark as failed
-            emailSendingProgress.markFailed(contact.id);
+            emailSendingProgress.markFailed(tabId, contact.id);
             results.failed++;
             results.errors.push({
               contact: contact.name,
@@ -1023,7 +1306,7 @@
             });
 
             // Stop sending and show error
-            alert(errorMsg);
+            toastError(errorMsg);
             throw new Error(errorMsg);
           }
 
@@ -1042,36 +1325,51 @@
             attachments: attachments.length > 0 ? attachments : undefined
           };
 
-          // Send email via IPC to main process
-          await sendEmailViaIPC(emailData);
+          // Send email via IPC to main process with custom from address
+          await sendEmailViaIPC(emailData, currentFromAddress);
 
           results.success++;
           console.log(`✅ Sent to ${contact.email}`);
+
+          // Log successful send to database
+          await emailLogsStore.logEmail({
+            sessionId,
+            contactId: contact.id,
+            contactName: contact.name,
+            contactEmail: contact.email,
+            subject: personalizedSubject,
+            templateId: selectedTemplate?.id || null,
+            templateName: selectedTemplate?.name || null,
+            fromAddress: currentFromAddress,
+            status: 'success',
+            errorMessage: null
+          });
 
           // Log successful send
           logger.info('email', `Email sent successfully to ${contact.name}`, {
             to: contact.email,
             subject: personalizedSubject,
-            position: `${i + 1} of ${contacts.length}`
+            position: `${i + 1} of ${contacts.length}`,
+            sessionId
           });
 
           // Mark contact as completed in the store
-          emailSendingProgress.markCompleted(contact.id);
+          emailSendingProgress.markCompleted(tabId, contact.id);
 
-          // Random delay between 50 seconds and 2 minutes (50-120 seconds)
+          // Random delay between 40 and 70 seconds
           // Only delay if there are more emails to send
           if (i < contacts.length - 1) {
-            const delayMs = getRandomDelay(50, 120);
+            const delayMs = getRandomDelay(40, 70);
             const delaySec = Math.round(delayMs / 1000);
             console.log(`⏳ Waiting ${delaySec} seconds before next email...`);
 
             // Start the delay countdown in the store
-            emailSendingProgress.startDelay(delayMs);
+            emailSendingProgress.startDelay(tabId, delayMs);
 
             await new Promise(resolve => setTimeout(resolve, delayMs));
 
             // Clear the delay countdown
-            emailSendingProgress.clearDelay();
+            emailSendingProgress.clearDelay(tabId);
           }
 
         } catch (error) {
@@ -1081,86 +1379,106 @@
             email: contact.email,
             error: error.message
           });
-          console.error(`❌ Failed to send to ${contact.email}:`, error);
+          console.error(`Failed to send to ${contact.email}:`, error);
+
+          // Log failed send to database
+          await emailLogsStore.logEmail({
+            sessionId,
+            contactId: contact.id,
+            contactName: contact.name,
+            contactEmail: contact.email,
+            subject: subject.substring(0, 200),
+            templateId: selectedTemplate?.id || null,
+            templateName: selectedTemplate?.name || null,
+            fromAddress: currentFromAddress,
+            status: 'failed',
+            errorMessage: error.message
+          });
 
           // Log email send failure
           logger.error('email', `Failed to send email to ${contact.name}`, {
             to: contact.email,
             error: error.message,
-            position: `${i + 1} of ${contacts.length}`
+            position: `${i + 1} of ${contacts.length}`,
+            sessionId
           });
 
           // Mark contact as failed in the store
-          emailSendingProgress.markFailed(contact.id);
+          emailSendingProgress.markFailed(tabId, contact.id);
 
           // Still wait before next attempt even if this one failed
           if (i < contacts.length - 1) {
-            const delayMs = getRandomDelay(50, 120);
+            const delayMs = getRandomDelay(40, 70);
             const delaySec = Math.round(delayMs / 1000);
-            console.log(`⏳ Waiting ${delaySec} seconds before next email...`);
+            console.log(`Waiting ${delaySec} seconds before next email...`);
 
             // Start the delay countdown in the store
-            emailSendingProgress.startDelay(delayMs);
+            emailSendingProgress.startDelay(tabId, delayMs);
 
             await new Promise(resolve => setTimeout(resolve, delayMs));
 
             // Clear the delay countdown
-            emailSendingProgress.clearDelay();
+            emailSendingProgress.clearDelay(tabId);
           }
         }
       }
+
+      // Update email session with final statistics
+      await emailSessionsStore.updateSession(sessionId, {
+        successfulSends: results.success,
+        failedSends: results.failed,
+        status: 'completed',
+        completedAt: new Date().toISOString()
+      });
 
       // Log completion
       logger.info('email', 'Email sending batch completed', {
         total: contacts.length,
         success: results.success,
-        failed: results.failed
+        failed: results.failed,
+        sessionId
       });
 
-      // Show results
-      let message = `Email sending complete!\n\n`;
-      message += `✅ Successfully sent: ${results.success}\n`;
+      // Show results via toast notifications
       if (results.failed > 0) {
-        message += `❌ Failed: ${results.failed}\n\n`;
-        message += `Failed contacts:\n`;
-        results.errors.forEach(err => {
-          message += `- ${err.contact} (${err.email}): ${err.error}\n`;
-        });
+        toastWarning(`Sent ${results.success} emails, ${results.failed} failed. Check logs for details.`);
+      } else {
+        toastSuccess(`Successfully sent ${results.success} emails!`);
       }
-
-      alert(message);
 
       // Clear form if all succeeded
       if (results.failed === 0) {
         clearForm();
       }
 
-      // Reset visual indicators after 5 seconds to allow users to see the results
-      setTimeout(() => {
-        emailSendingProgress.reset();
-      }, 5000);
+      // End the sending operation in the store immediately
+      emailSendingProgress.endSending(tabId);
 
     } catch (error) {
       console.error('Failed to send emails:', error);
 
+      // Update email session as cancelled/failed
+      await emailSessionsStore.updateSession(sessionId, {
+        successfulSends: results.success,
+        failedSends: results.failed,
+        status: 'cancelled',
+        completedAt: new Date().toISOString()
+      });
+
       // Log critical error
       logger.error('email', 'Email sending batch failed', {
         error: error.message,
-        stack: error.stack
+        stack: error.stack,
+        sessionId
       });
 
-      alert(`Failed to send emails: ${error.message}\n\nPlease check the console for details.`);
+      toastError(`Failed to send emails: ${error.message}`);
 
-      // Reset visual indicators after error
-      setTimeout(() => {
-        emailSendingProgress.reset();
-      }, 5000);
+      // End the sending operation in the store
+      emailSendingProgress.endSending(tabId);
     } finally {
       isSending = false;
       sendingProgress = { current: 0, total: 0, currentEmail: '' };
-
-      // End the sending operation in the store (but keep the visual states for 5 seconds)
-      emailSendingProgress.endSending();
     }
   }
   
@@ -1183,7 +1501,7 @@
     activeInputElement = null;
 
     console.log('Saving draft...');
-    alert('Draft saved! (Note: Draft functionality not yet implemented)');
+    toastInfo('Draft saved! (Note: Draft functionality not yet implemented)');
   }
   
   /**
@@ -1196,8 +1514,16 @@
 
 <div class="email-composer">
   <div class="composer-header">
-    <h2>Compose Email</h2>
+    <h2>Compose Email - From: {currentFromAddress}</h2>
     <div class="header-actions">
+      <button
+        class="btn-icon"
+        onclick={() => showFromAddressSelector = !showFromAddressSelector}
+        title="Change from address"
+        aria-label="Change from address"
+      >
+        <AtSign size={20} />
+      </button>
       <button class="btn-icon" onclick={togglePreview} title="Preview email" aria-label="Preview email">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
@@ -1213,6 +1539,34 @@
       </button>
     </div>
   </div>
+
+  {#if showFromAddressSelector}
+    <div class="from-address-selector-panel">
+      <h3>Select From Address</h3>
+      <div class="from-address-options">
+        {#each [
+          { value: 'office@justhemis.com', label: 'Main Office' },
+          { value: 'uk@justhemis.com', label: 'UK Office' },
+          { value: 'usa@justhemis.com', label: 'USA Office' },
+          { value: 'canada@justhemis.com', label: 'Canada Office' },
+          { value: 'australia@justhemis.com', label: 'Australia Office' }
+        ] as option}
+          <button
+            class="from-address-option"
+            class:active={currentFromAddress === option.value}
+            onclick={() => {
+              emailTabsStore.updateTabFromAddress(tabId, option.value);
+              showFromAddressSelector = false;
+            }}
+          >
+            <div class="option-label">{option.label}</div>
+            <div class="option-email">{option.value}</div>
+          </button>
+        {/each}
+      </div>
+      <button class="btn-secondary" onclick={() => showFromAddressSelector = false}>Close</button>
+    </div>
+  {/if}
   
   {#if showPreview}
     <div class="email-preview">
@@ -1237,17 +1591,37 @@
   {:else}
     <div class="composer-body">
       <div class="email-fields">
-        <div class="recipients-info">
-          <div class="recipients-label">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-              <circle cx="9" cy="7" r="4"></circle>
-              <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
-              <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
-            </svg>
-            <span>This email will be sent to <strong>{$contactsStore.length} contact(s)</strong></span>
+        {#if !isTemplateMode}
+          <div class="recipients-info">
+            <div class="recipients-label">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+              </svg>
+              <span>This email will be sent to <strong>{$contactsStore.length} contact(s)</strong></span>
+            </div>
           </div>
-        </div>
+
+          <!-- Template Selector -->
+          {#if templates.length > 0}
+            <div class="field-row">
+              <label for="template-selector">Load Template:</label>
+              <select
+                id="template-selector"
+                bind:value={selectedTemplateId}
+                onchange={() => selectedTemplateId && loadTemplate(selectedTemplateId)}
+                class="field-input"
+              >
+                <option value={null}>-- Select a template --</option>
+                {#each templates as template (template.id)}
+                  <option value={template.id}>{template.name}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
+        {/if}
 
         <div class="field-row" style="position: relative;">
           <label for="email-subject">Subject:</label>
@@ -1266,116 +1640,21 @@
         </div>
       </div>
 
-      <div class="editor-toolbar">
-        <button 
-          class="toolbar-btn {isBold ? 'active' : ''}" 
-          onclick={() => applyFormatting('bold')}
-          title="Bold"
-          aria-label="Bold"
-        >
-          <strong>B</strong>
-        </button>
-        <button 
-          class="toolbar-btn {isItalic ? 'active' : ''}" 
-          onclick={() => applyFormatting('italic')}
-          title="Italic"
-          aria-label="Italic"
-        >
-          <em>I</em>
-        </button>
-        <button 
-          class="toolbar-btn {isUnderline ? 'active' : ''}" 
-          onclick={() => applyFormatting('underline')}
-          title="Underline"
-          aria-label="Underline"
-        >
-          <u>U</u>
-        </button>
-        <div class="toolbar-divider"></div>
-        <button class="toolbar-btn" onclick={insertLink} title="Insert link" aria-label="Insert link">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
-          </svg>
-        </button>
-        <div class="toolbar-divider"></div>
-        <button class="toolbar-btn" onclick={openLayoutModal} title="Insert two-column layout" aria-label="Insert two-column layout">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-            <line x1="12" y1="3" x2="12" y2="21"></line>
-          </svg>
-        </button>
-        <button class="toolbar-btn" onclick={openButtonModal} title="Insert custom button" aria-label="Insert custom button">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="8" width="18" height="8" rx="2" ry="2"></rect>
-            <path d="M12 8v8"></path>
-          </svg>
-        </button>
-        <button class="toolbar-btn" onclick={openUnsubscribeModal} title="Insert unsubscribe button" aria-label="Insert unsubscribe button">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 6h18"></path>
-            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
-            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
-            <line x1="10" y1="11" x2="10" y2="17"></line>
-            <line x1="14" y1="11" x2="14" y2="17"></line>
-          </svg>
-        </button>
-        <div class="toolbar-divider"></div>
-        <label class="toolbar-btn" title="Insert image">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-            <circle cx="8.5" cy="8.5" r="1.5"></circle>
-            <polyline points="21 15 16 10 5 21"></polyline>
-          </svg>
-          <input
-            type="file"
-            accept="image/*"
-            onchange={handleImageInsertion}
-            style="display: none;"
-          />
-        </label>
-        <label class="toolbar-btn" title="Import HTML file">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-            <polyline points="14 2 14 8 20 8"></polyline>
-            <line x1="16" y1="13" x2="8" y2="13"></line>
-            <line x1="16" y1="17" x2="8" y2="17"></line>
-            <polyline points="10 9 9 9 8 9"></polyline>
-          </svg>
-          <input
-            type="file"
-            accept=".html,.htm"
-            onchange={handleHTMLImport}
-            style="display: none;"
-          />
-        </label>
-        <label class="toolbar-btn" title="Attach file">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
-          </svg>
-          <input
-            type="file"
-            multiple
-            onchange={handleFileAttachment}
-            style="display: none;"
-          />
-        </label>
-      </div>
-
-      <div
-        class="email-body-editor"
-        contenteditable="true"
-        bind:innerHTML={body}
-        oninput={handleInput}
-        onkeyup={updateFormattingState}
-        onkeydown={handleParamKeydown}
-        onclick={updateFormattingState}
+      <!-- TipTap Rich Text Editor -->
+      <RichTextEditor
+        bind:this={richTextEditorRef}
+        bind:content={body}
         placeholder="Write your email message here..."
-        role="textbox"
-        aria-label="Email body"
-        aria-multiline="true"
-        tabindex="0"
-      ></div>
+        onParamTrigger={(pos) => {
+          paramDropdownPosition = pos;
+          showParamDropdown = true;
+          activeInputElement = 'richTextEditor';
+        }}
+        showAttachButton={true}
+        showHtmlImportButton={true}
+        onAttach={handleFileAttachment}
+        onHtmlImport={handleHTMLImport}
+      />
 
       {#if showParamDropdown}
         <div
@@ -1387,7 +1666,10 @@
             <button
               class="param-option {index === selectedParamIndex ? 'selected' : ''}"
               onclick={() => {
-                if (activeInputElement) {
+                if (activeInputElement === 'richTextEditor' && richTextEditorRef) {
+                  richTextEditorRef.insertParameter(param.name);
+                  showParamDropdown = false;
+                } else if (activeInputElement) {
                   insertParameter(param.name, activeInputElement);
                 }
               }}
@@ -1440,40 +1722,42 @@
     </div>
   {/if}
 
-  <div class="composer-footer">
-    <button
-      class="btn-primary"
-      onclick={handleSendToAll}
-      disabled={isSending || getTargetContacts().length === 0}
-    >
-      {#if isSending}
-        <span class="spinner"></span>
-        {#if sendingProgress.total > 0}
-          Sending {sendingProgress.current}/{sendingProgress.total}...
+  {#if !isTemplateMode}
+    <div class="composer-footer">
+      <button
+        class="btn-primary"
+        onclick={handleSendToAll}
+        disabled={isSending || getTargetContacts().length === 0}
+      >
+        {#if isSending}
+          <span class="spinner"></span>
+          {#if sendingProgress.total > 0}
+            Sending {sendingProgress.current}/{sendingProgress.total}...
+          {:else}
+            Sending...
+          {/if}
         {:else}
-          Sending...
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+          {#if selectedListId !== null}
+            Send to {getSelectionDisplayName()} ({getTargetContacts().length})
+          {:else}
+            Send to All Contacts ({getTargetContacts().length})
+          {/if}
         {/if}
-      {:else}
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="22" y1="2" x2="11" y2="13"></line>
-          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-        </svg>
-        {#if selectedListId !== null}
-          Send to {getSelectionDisplayName()} ({getTargetContacts().length})
-        {:else}
-          Send to All Contacts ({getTargetContacts().length})
-        {/if}
-      {/if}
-    </button>
-    <button class="btn-secondary" onclick={clearForm} disabled={isSending}>
-      Clear
-    </button>
-  </div>
-
-  {#if isSending && sendingProgress.currentEmail}
-    <div class="sending-status">
-      Sending to: {sendingProgress.currentEmail}
+      </button>
+      <button class="btn-secondary" onclick={clearForm} disabled={isSending}>
+        Clear
+      </button>
     </div>
+
+    {#if isSending && sendingProgress.currentEmail}
+      <div class="sending-status">
+        Sending to: {sendingProgress.currentEmail}
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -2035,6 +2319,8 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    /* min-height: 0 prevents flex overflow issues on Windows */
+    min-height: 0;
     background-color: #242424;
   }
 
@@ -2056,6 +2342,62 @@
   .header-actions {
     display: flex;
     gap: 8px;
+  }
+
+  .from-address-selector-panel {
+    padding: 24px 32px;
+    background: #2a2a2a;
+    border-bottom: 1px solid #333;
+  }
+
+  .from-address-selector-panel h3 {
+    margin: 0 0 16px 0;
+    color: #fff;
+    font-size: 1.1rem;
+    font-weight: 600;
+  }
+
+  .from-address-options {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .from-address-option {
+    padding: 12px 16px;
+    background: #333;
+    border: 2px solid #444;
+    border-radius: 8px;
+    color: #fff;
+    text-align: left;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .from-address-option:hover {
+    background: #3a3a3a;
+    border-color: #667eea;
+  }
+
+  .from-address-option.active {
+    background: #667eea;
+    border-color: #667eea;
+  }
+
+  .option-label {
+    font-weight: 600;
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+
+  .option-email {
+    font-size: 12px;
+    color: #aaa;
+  }
+
+  .from-address-option.active .option-email {
+    color: #fff;
   }
 
   .btn-icon {
@@ -2086,6 +2428,8 @@
 
   .composer-body {
     flex: 1;
+    /* min-height: 0 is critical for proper scroll behavior in nested flex containers on Windows */
+    min-height: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -2157,91 +2501,6 @@
     background-color: #0066ff22;
     color: #66b3ff;
     border: 1px solid #0066ff44;
-    font-weight: 600;
-  }
-
-  .editor-toolbar {
-    padding: 12px 32px;
-    border-bottom: 1px solid #333;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    background-color: #1e1e1e;
-  }
-
-  .toolbar-btn {
-    width: 32px;
-    height: 32px;
-    border-radius: 6px;
-    border: 1px solid transparent !important;
-    background-color: transparent !important;
-    color: #aaa;
-    cursor: pointer;
-    display: flex !important;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.2s;
-    font-size: 0.95rem;
-    padding: 0 !important;
-  }
-
-  .toolbar-btn svg {
-    display: block !important;
-    flex-shrink: 0;
-  }
-
-  .toolbar-btn:hover {
-    background-color: #333 !important;
-    color: #fff !important;
-  }
-
-  .toolbar-btn.active {
-    background-color: #0066ff !important;
-    color: #fff !important;
-    border-color: #0066ff !important;
-  }
-
-  .toolbar-divider {
-    width: 1px;
-    height: 24px;
-    background-color: #444;
-    margin: 0 8px;
-  }
-
-  .email-body-editor {
-    flex: 1;
-    padding: 24px 32px;
-    overflow-y: auto;
-    color: #fff;
-    font-size: 1rem;
-    line-height: 1.6;
-    outline: none;
-    min-height: 300px;
-  }
-
-  .email-body-editor:empty:before {
-    content: attr(placeholder);
-    color: #666;
-    pointer-events: none;
-  }
-
-  .email-body-editor {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  }
-
-  /* Parameter highlighting */
-  .email-body-editor :global(.param-highlight) {
-    background-color: #0066ff33;
-    border-radius: 4px;
-    padding: 2px 4px;
-    color: #66b3ff;
-    border: 1px solid #0066ff66;
-    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-    font-size: 0.95em;
-  }
-
-  .email-body-editor :global(.param-name) {
-    color: #ff9966;
     font-weight: 600;
   }
 
@@ -2465,23 +2724,19 @@
   }
 
   /* Custom scrollbar */
-  .email-body-editor::-webkit-scrollbar,
   .email-preview::-webkit-scrollbar {
     width: 8px;
   }
 
-  .email-body-editor::-webkit-scrollbar-track,
   .email-preview::-webkit-scrollbar-track {
     background: transparent;
   }
 
-  .email-body-editor::-webkit-scrollbar-thumb,
   .email-preview::-webkit-scrollbar-thumb {
     background: #444;
     border-radius: 4px;
   }
 
-  .email-body-editor::-webkit-scrollbar-thumb:hover,
   .email-preview::-webkit-scrollbar-thumb:hover {
     background: #555;
   }

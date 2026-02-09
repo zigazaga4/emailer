@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "graph-code": {
+      "type": "http",
+      "url": "http://5.2.229.52:8080"
+    }
+  }
+}

@@ -11,6 +11,9 @@ import {
 } from './twilio-api.js';
 import logger from './logger.js';
 
+// Auto-updater module (loaded dynamically in production only)
+let autoUpdaterModule = null;
+
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -88,16 +91,29 @@ function createWindow() {
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
     console.error('[Main] Failed to load:', errorCode, errorDescription);
   });
+
+  // Initialize auto-updater
+  mainWindow.webContents.on('did-finish-load', async () => {
+    try {
+      // Dynamically import auto-updater
+      autoUpdaterModule = await import('./auto-updater.js');
+      autoUpdaterModule.initAutoUpdater(mainWindow);
+      logger.info('app', 'Auto-updater initialized', { version: autoUpdaterModule.getCurrentVersion() });
+    } catch (error) {
+      console.error('[Main] Failed to initialize auto-updater:', error);
+      logger.error('app', 'Failed to initialize auto-updater', { error: error.message });
+    }
+  });
 }
 
 /**
  * Setup IPC handlers for Email API and Twilio WhatsApp API
  */
 function setupIPCHandlers() {
-  // Email API handler - supports both Zoho and cPanel
+  // Email API handler - SendGrid
   ipcMain.handle('zoho:sendEmail', async (_event, emailData, settings) => {
     try {
-      console.log('[Main] Received sendEmail request');
+      console.log('[Main] Received sendEmail request via SendGrid');
       const result = await sendEmail(emailData, settings);
       return { success: true, data: result };
     } catch (error) {
@@ -210,6 +226,34 @@ function setupIPCHandlers() {
       return { success: true, data: count };
     } catch (error) {
       console.error('[Main] clearOldLogs error:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Auto-updater API handlers (only work in production when module is loaded)
+
+  // Check for updates manually
+  ipcMain.handle('updater:checkForUpdates', async () => {
+    try {
+      if (!autoUpdaterModule) {
+        return { success: false, error: 'Auto-updater not available in development mode' };
+      }
+      await autoUpdaterModule.checkForUpdates();
+      return { success: true };
+    } catch (error) {
+      console.error('[Main] checkForUpdates error:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Get current app version
+  ipcMain.handle('updater:getVersion', async () => {
+    try {
+      // Use app.getVersion() directly - works in both dev and production
+      const version = app.getVersion();
+      return { success: true, data: version };
+    } catch (error) {
+      console.error('[Main] getVersion error:', error);
       return { success: false, error: error.message };
     }
   });

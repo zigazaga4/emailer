@@ -116,12 +116,67 @@ class DatabaseService {
       );
     `;
 
+    const createTemplatesTable = `
+      CREATE TABLE IF NOT EXISTS email_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        subject TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `;
+
+    const createEmailSessionsTable = `
+      CREATE TABLE IF NOT EXISTS email_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_name TEXT,
+        list_id INTEGER,
+        list_name TEXT,
+        template_id INTEGER,
+        template_name TEXT,
+        subject TEXT NOT NULL,
+        from_address TEXT NOT NULL,
+        total_contacts INTEGER NOT NULL DEFAULT 0,
+        successful_sends INTEGER NOT NULL DEFAULT 0,
+        failed_sends INTEGER NOT NULL DEFAULT 0,
+        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        completed_at DATETIME,
+        status TEXT NOT NULL DEFAULT 'in_progress',
+        FOREIGN KEY (list_id) REFERENCES lists(id) ON DELETE SET NULL,
+        FOREIGN KEY (template_id) REFERENCES email_templates(id) ON DELETE SET NULL
+      );
+    `;
+
+    const createEmailLogsTable = `
+      CREATE TABLE IF NOT EXISTS email_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        contact_id INTEGER NOT NULL,
+        contact_name TEXT NOT NULL,
+        contact_email TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        template_id INTEGER,
+        template_name TEXT,
+        from_address TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error_message TEXT,
+        sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (session_id) REFERENCES email_sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE,
+        FOREIGN KEY (template_id) REFERENCES email_templates(id) ON DELETE SET NULL
+      );
+    `;
+
     this.db.run(createContactsTable);
     this.db.run(createListsTable);
     this.db.run(createListMembershipsTable);
     this.db.run(createWhatsappContactsTable);
     this.db.run(createWhatsappListsTable);
     this.db.run(createWhatsappListMembershipsTable);
+    this.db.run(createTemplatesTable);
+    this.db.run(createEmailSessionsTable);
+    this.db.run(createEmailLogsTable);
     this.saveDatabase();
   }
 
@@ -222,6 +277,91 @@ class DatabaseService {
         this.saveDatabase();
 
         console.log('WhatsApp migration completed successfully!');
+      }
+
+      // Check if email_templates table exists
+      const templatesTablesResult = this.db.exec(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='email_templates'"
+      );
+
+      const templatesTableExists = templatesTablesResult.length > 0 && templatesTablesResult[0].values.length > 0;
+
+      if (!templatesTableExists) {
+        console.log('Running migration: Creating email_templates table...');
+
+        const createTemplatesTable = `
+          CREATE TABLE IF NOT EXISTS email_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          );
+        `;
+
+        this.db.run(createTemplatesTable);
+        this.saveDatabase();
+
+        console.log('Email templates migration completed successfully!');
+      }
+
+      // Check if email_sessions table exists
+      const emailSessionsResult = this.db.exec(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='email_sessions'"
+      );
+
+      const emailSessionsTableExists = emailSessionsResult.length > 0 && emailSessionsResult[0].values.length > 0;
+
+      if (!emailSessionsTableExists) {
+        console.log('Running migration: Creating email_sessions and email_logs tables...');
+
+        const createEmailSessionsTable = `
+          CREATE TABLE IF NOT EXISTS email_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_name TEXT,
+            list_id INTEGER,
+            list_name TEXT,
+            template_id INTEGER,
+            template_name TEXT,
+            subject TEXT NOT NULL,
+            from_address TEXT NOT NULL,
+            total_contacts INTEGER NOT NULL DEFAULT 0,
+            successful_sends INTEGER NOT NULL DEFAULT 0,
+            failed_sends INTEGER NOT NULL DEFAULT 0,
+            started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME,
+            status TEXT NOT NULL DEFAULT 'in_progress',
+            FOREIGN KEY (list_id) REFERENCES lists(id) ON DELETE SET NULL,
+            FOREIGN KEY (template_id) REFERENCES email_templates(id) ON DELETE SET NULL
+          );
+        `;
+
+        const createEmailLogsTable = `
+          CREATE TABLE IF NOT EXISTS email_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            contact_id INTEGER NOT NULL,
+            contact_name TEXT NOT NULL,
+            contact_email TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            template_id INTEGER,
+            template_name TEXT,
+            from_address TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES email_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE,
+            FOREIGN KEY (template_id) REFERENCES email_templates(id) ON DELETE SET NULL
+          );
+        `;
+
+        this.db.run(createEmailSessionsTable);
+        this.db.run(createEmailLogsTable);
+        this.saveDatabase();
+
+        console.log('Email tracking migration completed successfully!');
       }
     } catch (error) {
       console.error('Migration failed:', error);
@@ -913,10 +1053,414 @@ class DatabaseService {
       return [];
     }
   }
+
+  /**
+   * Get all email templates
+   * @returns {Array} Array of templates
+   */
+  getAllTemplates() {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const result = this.db.exec('SELECT * FROM email_templates ORDER BY name ASC');
+
+      if (result.length === 0) return [];
+
+      const templates = result[0].values.map(row => ({
+        id: row[0],
+        name: row[1],
+        subject: row[2],
+        body: row[3],
+        created_at: row[4],
+        updated_at: row[5],
+        fromAddress: 'office@justhemis.com'
+      }));
+
+      return templates;
+    } catch (error) {
+      console.error('Failed to get templates:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Add a new email template
+   * @param {string} name - Template name
+   * @param {string} subject - Email subject
+   * @param {string} body - Email body
+   * @returns {Object} The created template
+   */
+  addTemplate(name, subject, body) {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const stmt = this.db.prepare(
+        'INSERT INTO email_templates (name, subject, body) VALUES (?, ?, ?)'
+      );
+      stmt.run([name, subject, body]);
+      stmt.free();
+
+      const result = this.db.exec(
+        'SELECT * FROM email_templates WHERE id = last_insert_rowid()'
+      );
+
+      this.saveDatabase();
+
+      if (result.length > 0 && result[0].values.length > 0) {
+        const row = result[0].values[0];
+        return {
+          id: row[0],
+          name: row[1],
+          subject: row[2],
+          body: row[3],
+          created_at: row[4],
+          updated_at: row[5],
+          fromAddress: 'office@justhemis.com'
+        };
+      }
+
+      return null;
+    } catch (error) {
+      console.error('Failed to add template:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update an email template
+   * @param {number} id - Template ID
+   * @param {string} name - Template name
+   * @param {string} subject - Email subject
+   * @param {string} body - Email body
+   * @returns {boolean} Success status
+   */
+  updateTemplate(id, name, subject, body) {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const stmt = this.db.prepare(
+        'UPDATE email_templates SET name = ?, subject = ?, body = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+      );
+      stmt.run([name, subject, body, id]);
+      stmt.free();
+
+      this.saveDatabase();
+      return true;
+    } catch (error) {
+      console.error('Failed to update template:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Delete an email template
+   * @param {number} id - Template ID
+   * @returns {boolean} Success status
+   */
+  deleteTemplate(id) {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const stmt = this.db.prepare('DELETE FROM email_templates WHERE id = ?');
+      stmt.run([id]);
+      stmt.free();
+
+      this.saveDatabase();
+      return true;
+    } catch (error) {
+      console.error('Failed to delete template:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Create a new email session
+   * @param {Object} sessionData - Session data
+   * @returns {number} Session ID
+   */
+  createEmailSession(sessionData) {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const stmt = this.db.prepare(
+        `INSERT INTO email_sessions (
+          session_name, list_id, list_name, template_id, template_name,
+          subject, from_address, total_contacts, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      stmt.run([
+        sessionData.sessionName || null,
+        sessionData.listId || null,
+        sessionData.listName || null,
+        sessionData.templateId || null,
+        sessionData.templateName || null,
+        sessionData.subject,
+        sessionData.fromAddress,
+        sessionData.totalContacts,
+        'in_progress'
+      ]);
+      stmt.free();
+
+      const result = this.db.exec('SELECT last_insert_rowid()');
+      this.saveDatabase();
+
+      return result[0].values[0][0];
+    } catch (error) {
+      console.error('Failed to create email session:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update email session statistics
+   * @param {number} sessionId - Session ID
+   * @param {Object} stats - Statistics to update
+   */
+  updateEmailSession(sessionId, stats) {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const updates = [];
+      const values = [];
+
+      if (stats.successfulSends !== undefined) {
+        updates.push('successful_sends = ?');
+        values.push(stats.successfulSends);
+      }
+      if (stats.failedSends !== undefined) {
+        updates.push('failed_sends = ?');
+        values.push(stats.failedSends);
+      }
+      if (stats.status !== undefined) {
+        updates.push('status = ?');
+        values.push(stats.status);
+      }
+      if (stats.completedAt !== undefined) {
+        updates.push('completed_at = ?');
+        values.push(stats.completedAt);
+      }
+
+      if (updates.length === 0) return;
+
+      values.push(sessionId);
+
+      const stmt = this.db.prepare(
+        `UPDATE email_sessions SET ${updates.join(', ')} WHERE id = ?`
+      );
+      stmt.run(values);
+      stmt.free();
+
+      this.saveDatabase();
+    } catch (error) {
+      console.error('Failed to update email session:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Log an email send attempt
+   * @param {Object} logData - Log data
+   */
+  logEmailSend(logData) {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const stmt = this.db.prepare(
+        `INSERT INTO email_logs (
+          session_id, contact_id, contact_name, contact_email,
+          subject, template_id, template_name, from_address, status, error_message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      stmt.run([
+        logData.sessionId,
+        logData.contactId,
+        logData.contactName,
+        logData.contactEmail,
+        logData.subject,
+        logData.templateId || null,
+        logData.templateName || null,
+        logData.fromAddress,
+        logData.status,
+        logData.errorMessage || null
+      ]);
+      stmt.free();
+
+      this.saveDatabase();
+    } catch (error) {
+      console.error('Failed to log email send:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all email sessions
+   * @returns {Array} Array of sessions
+   */
+  getAllEmailSessions() {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const result = this.db.exec(
+        'SELECT * FROM email_sessions ORDER BY started_at DESC'
+      );
+
+      if (result.length === 0) return [];
+
+      const sessions = result[0].values.map(row => ({
+        id: row[0],
+        sessionName: row[1],
+        listId: row[2],
+        listName: row[3],
+        templateId: row[4],
+        templateName: row[5],
+        subject: row[6],
+        fromAddress: row[7],
+        totalContacts: row[8],
+        successfulSends: row[9],
+        failedSends: row[10],
+        startedAt: row[11],
+        completedAt: row[12],
+        status: row[13]
+      }));
+
+      return sessions;
+    } catch (error) {
+      console.error('Failed to get email sessions:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get email logs for a specific session
+   * @param {number} sessionId - Session ID
+   * @returns {Array} Array of email logs
+   */
+  getEmailLogsForSession(sessionId) {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const result = this.db.exec(
+        'SELECT * FROM email_logs WHERE session_id = ? ORDER BY sent_at ASC',
+        [sessionId]
+      );
+
+      if (result.length === 0) return [];
+
+      const logs = result[0].values.map(row => ({
+        id: row[0],
+        sessionId: row[1],
+        contactId: row[2],
+        contactName: row[3],
+        contactEmail: row[4],
+        subject: row[5],
+        templateId: row[6],
+        templateName: row[7],
+        fromAddress: row[8],
+        status: row[9],
+        errorMessage: row[10],
+        sentAt: row[11]
+      }));
+
+      return logs;
+    } catch (error) {
+      console.error('Failed to get email logs for session:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get all email logs for a specific contact
+   * @param {number} contactId - Contact ID
+   * @returns {Array} Array of email logs
+   */
+  getEmailLogsForContact(contactId) {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const result = this.db.exec(
+        `SELECT el.*, es.session_name, es.started_at as session_started_at
+         FROM email_logs el
+         LEFT JOIN email_sessions es ON el.session_id = es.id
+         WHERE el.contact_id = ?
+         ORDER BY el.sent_at DESC`,
+        [contactId]
+      );
+
+      if (result.length === 0) return [];
+
+      const logs = result[0].values.map(row => ({
+        id: row[0],
+        sessionId: row[1],
+        contactId: row[2],
+        contactName: row[3],
+        contactEmail: row[4],
+        subject: row[5],
+        templateId: row[6],
+        templateName: row[7],
+        fromAddress: row[8],
+        status: row[9],
+        errorMessage: row[10],
+        sentAt: row[11],
+        sessionName: row[12],
+        sessionStartedAt: row[13]
+      }));
+
+      return logs;
+    } catch (error) {
+      console.error('Failed to get email logs for contact:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get email statistics for a contact
+   * @param {number} contactId - Contact ID
+   * @returns {Object} Statistics object
+   */
+  getContactEmailStats(contactId) {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const result = this.db.exec(
+        `SELECT
+          COUNT(*) as total_emails,
+          SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successful_emails,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_emails
+         FROM email_logs
+         WHERE contact_id = ?`,
+        [contactId]
+      );
+
+      if (result.length === 0 || result[0].values.length === 0) {
+        return {
+          totalEmails: 0,
+          successfulEmails: 0,
+          failedEmails: 0
+        };
+      }
+
+      const row = result[0].values[0];
+      return {
+        totalEmails: row[0],
+        successfulEmails: row[1],
+        failedEmails: row[2]
+      };
+    } catch (error) {
+      console.error('Failed to get contact email stats:', error);
+      return {
+        totalEmails: 0,
+        successfulEmails: 0,
+        failedEmails: 0
+      };
+    }
+  }
 }
 
 // Create singleton instance
 const dbService = new DatabaseService();
+
+// Export database instance for use in other stores
+export const database = dbService;
 
 // Create Svelte stores for contacts and lists
 export const contactsStore = writable([]);

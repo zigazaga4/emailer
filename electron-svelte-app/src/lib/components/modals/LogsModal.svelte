@@ -1,5 +1,7 @@
 <script>
   import { X, RefreshCw, Trash2, Download } from 'lucide-svelte';
+  import { toastSuccess, toastError } from '../../stores/toastStore.js';
+  import { confirm as confirmDialog } from '../../stores/dialogStore.js';
 
   // @ts-ignore - window.require is available in Electron renderer with nodeIntegration
   const { ipcRenderer } = window.require('electron');
@@ -56,18 +58,22 @@
    * Clear old logs
    */
   async function clearOldLogs() {
-    if (!confirm('Clear logs older than 30 days?')) return;
+    const confirmed = await confirmDialog(
+      'Clear logs older than 30 days?',
+      { title: 'Clear Logs', confirmText: 'Clear', cancelText: 'Cancel', dangerous: true }
+    );
+    if (!confirmed) return;
 
     try {
       const result = await ipcRenderer.invoke('logs:clearOld', 30);
       if (result.success) {
-        alert(`Cleared ${result.data} old log entries`);
+        toastSuccess(`Cleared ${result.data} old log entries`);
         await loadLogs();
         await loadStats();
       }
     } catch (error) {
       console.error('Failed to clear logs:', error);
-      alert('Failed to clear logs');
+      toastError('Failed to clear logs');
     }
   }
 
@@ -263,8 +269,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 2000;
+    z-index: 1000;
     padding: 20px;
+    pointer-events: auto;
   }
 
   .modal-content {

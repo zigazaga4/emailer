@@ -4,8 +4,11 @@
 
   /**
    * Component props
+   * @param {boolean} isOpen - Whether the modal is open
+   * @param {Function} onClose - Callback when modal closes
+   * @param {number|null} defaultListId - Default list ID to import contacts into
    */
-  let { isOpen = false, onClose = () => {} } = $props();
+  let { isOpen = false, onClose = () => {}, defaultListId = null } = $props();
 
   /**
    * Component state
@@ -15,6 +18,16 @@
   let importResults = $state(null);
   let error = $state('');
   let selectedListId = $state('none');
+
+  /**
+   * Set the selected list ID to the default when modal opens
+   */
+  $effect(() => {
+    if (isOpen) {
+      // Use the default list ID if provided, otherwise 'none'
+      selectedListId = defaultListId !== null ? String(defaultListId) : 'none';
+    }
+  });
   
   /**
    * Handle file selection
@@ -52,10 +65,11 @@
         continue;
       }
 
-      // Match name pattern: number followed by dot and name
-      // Example: "3. Eversheds Sutherland" or "1. Carson McDowell LLP"
-      const nameMatch = line.match(/^\d+\.\s+(.+)$/);
-      if (nameMatch) {
+      // Match name pattern: number followed by dot/punctuation and name
+      // Examples: "3. Eversheds Sutherland", "1.Carson McDowell", "2 - Company Name", "3) Name"
+      // Permissive: allows various separators and spacing after the number
+      const nameMatch = line.match(/^\s*\d+\s*[.\-)\]:\s]+\s*(.+)$/);
+      if (nameMatch && nameMatch[1] && !nameMatch[1].includes('@')) {
         // If we have a previous contact, save it
         if (currentName && currentEmail) {
           contacts.push({
@@ -69,10 +83,16 @@
         continue;
       }
 
-      // Match email pattern: "Email: email@domain.com"
-      const emailMatch = line.match(/^Email:\s*([^\s@]+@[^\s@]+\.[^\s@]+)$/i);
-      if (emailMatch) {
-        currentEmail = emailMatch[1].trim();
+      // Match email pattern - with or without "Email:" prefix
+      // First try with prefix: "Email: email@domain.com" or "E-mail: email@domain.com"
+      // Then try just the email address on its own line
+      const emailPrefixMatch = line.match(/^(?:e-?mail|email|e mail)[:\s]+\s*([^\s@]+@[^\s@]+\.[^\s@]+)/i);
+      const standaloneEmailMatch = line.match(/^([^\s@]+@[^\s@]+\.[^\s@]+)$/i);
+
+      const extractedEmail = emailPrefixMatch ? emailPrefixMatch[1] : (standaloneEmailMatch ? standaloneEmailMatch[1] : null);
+
+      if (extractedEmail) {
+        currentEmail = extractedEmail.trim().toLowerCase();
         // If we have both name and email, we can save immediately
         if (currentName && currentEmail) {
           contacts.push({

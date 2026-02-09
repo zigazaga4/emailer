@@ -4,20 +4,25 @@
     listsStore,
     listMembershipsVersion,
     deleteContact,
+    deleteList,
     getContactsInList,
     whatsappContactsStore,
     whatsappListsStore,
     whatsappListMembershipsVersion,
     deleteWhatsAppContact,
+    deleteWhatsAppList,
     getWhatsAppContactsInList
   } from '../../stores/database.js';
   import { emailSendingProgress } from '../../stores/emailSendingStore.js';
+  import { confirm as confirmDialog } from '../../stores/dialogStore.js';
 
   /**
    * Props for the Sidebar component
    */
   let {
     activeTab = 'email',
+    currentEmailTabId = null,
+    selectedListId = $bindable(null),
     onAddContact = () => {},
     onImportContacts = () => {},
     onDeleteAll = () => {},
@@ -36,11 +41,6 @@
    * Selected contact ID
    */
   let selectedContactId = $state(null);
-
-  /**
-   * Selected list ID (null means "All Contacts")
-   */
-  let selectedListId = $state(null);
 
   /**
    * Get contact count for a list (reactive)
@@ -62,29 +62,57 @@
    * @returns {string} 'waiting' | 'sending' | 'completed' | 'failed' | 'none'
    */
   function getContactSendingState(contactId) {
-    const progress = $emailSendingProgress;
+    const state = $emailSendingProgress;
 
-    // Only show states if sending is in progress and the target list matches
-    if (!progress.isSending || progress.targetListId !== selectedListId) {
-      return 'none';
+    // For email tab, get the progress for the current tab
+    if (activeTab === 'email' && currentEmailTabId) {
+      const tabProgress = state.sendingTabs[currentEmailTabId];
+
+      // Only show states if this tab is sending and the target list matches
+      if (!tabProgress || !tabProgress.isSending || tabProgress.targetListId !== selectedListId) {
+        return 'none';
+      }
+
+      // Check completed/failed first (these take priority over current)
+      if (tabProgress.completedContactIds.has(contactId)) {
+        return 'completed';
+      }
+
+      if (tabProgress.failedContactIds.has(contactId)) {
+        return 'failed';
+      }
+
+      // Then check if it's the current contact being sent
+      if (tabProgress.currentContactId === contactId) {
+        return 'sending';
+      }
+
+      // Otherwise it's waiting
+      return 'waiting';
     }
 
-    // Check completed/failed first (these take priority over current)
-    if (progress.completedContactIds.has(contactId)) {
-      return 'completed';
+    return 'none';
+  }
+
+  /**
+   * Check if a contact is being rate-limit retried
+   * @param {number} contactId - Contact ID
+   * @returns {boolean} True if this contact is currently being retried due to rate limit
+   */
+  function isRateLimitRetrying(contactId) {
+    const state = $emailSendingProgress;
+
+    if (activeTab === 'email' && currentEmailTabId) {
+      const tabProgress = state.sendingTabs[currentEmailTabId];
+      if (!tabProgress) return false;
+
+      // Rate limit retry shows timer on the CURRENT contact being sent
+      return tabProgress.isRateLimitRetrying &&
+             tabProgress.currentContactId === contactId &&
+             tabProgress.delayEndTime !== null;
     }
 
-    if (progress.failedContactIds.has(contactId)) {
-      return 'failed';
-    }
-
-    // Then check if it's the current contact being sent
-    if (progress.currentContactId === contactId) {
-      return 'sending';
-    }
-
-    // Otherwise it's waiting
-    return 'waiting';
+    return false;
   }
 
   /**
@@ -93,23 +121,34 @@
    * @returns {boolean} True if this is the next contact in queue
    */
   function isNextInQueue(contactId) {
-    const progress = $emailSendingProgress;
-    const state = getContactSendingState(contactId);
+    const state = $emailSendingProgress;
+    const contactState = getContactSendingState(contactId);
 
-    if (state !== 'waiting') {
+    if (contactState !== 'waiting') {
       return false;
     }
 
-    // Get all contacts in the current list
-    const contacts = progress.targetListId !== null
-      ? getContactsInList(progress.targetListId)
-      : $contactsStore;
+    // For email tab, get the progress for the current tab
+    if (activeTab === 'email' && currentEmailTabId) {
+      const tabProgress = state.sendingTabs[currentEmailTabId];
+      if (!tabProgress) return false;
 
-    // Find the first contact that is still waiting
-    for (const c of contacts) {
-      const cState = getContactSendingState(c.id);
-      if (cState === 'waiting') {
-        return c.id === contactId;
+      // Don't show "next in queue" timer if we're rate limit retrying (timer shows on current contact)
+      if (tabProgress.isRateLimitRetrying) {
+        return false;
+      }
+
+      // Get all contacts in the current list
+      const contacts = tabProgress.targetListId !== null
+        ? getContactsInList(tabProgress.targetListId)
+        : $contactsStore;
+
+      // Find the first contact that is still waiting
+      for (const c of contacts) {
+        const cState = getContactSendingState(c.id);
+        if (cState === 'waiting') {
+          return c.id === contactId;
+        }
       }
     }
 
@@ -121,14 +160,20 @@
    * @returns {number} Remaining seconds, or 0 if no delay
    */
   function getRemainingSeconds() {
-    const progress = $emailSendingProgress;
+    const state = $emailSendingProgress;
 
-    if (!progress.delayEndTime) {
-      return 0;
+    // For email tab, get the progress for the current tab
+    if (activeTab === 'email' && currentEmailTabId) {
+      const tabProgress = state.sendingTabs[currentEmailTabId];
+      if (!tabProgress || !tabProgress.delayEndTime) {
+        return 0;
+      }
+
+      const remaining = Math.max(0, Math.ceil((tabProgress.delayEndTime - Date.now()) / 1000));
+      return remaining;
     }
 
-    const remaining = Math.max(0, Math.ceil((progress.delayEndTime - Date.now()) / 1000));
-    return remaining;
+    return 0;
   }
 
   /**
@@ -137,24 +182,31 @@
   let countdown = $state(0);
 
   $effect(() => {
-    const progress = $emailSendingProgress;
+    const state = $emailSendingProgress;
 
-    if (progress.delayEndTime) {
-      // Update countdown immediately
-      countdown = getRemainingSeconds();
+    // For email tab, get the progress for the current tab
+    if (activeTab === 'email' && currentEmailTabId) {
+      const tabProgress = state.sendingTabs[currentEmailTabId];
 
-      // Set up interval to update every second
-      const interval = setInterval(() => {
+      if (tabProgress && tabProgress.delayEndTime) {
+        // Update countdown immediately
         countdown = getRemainingSeconds();
 
-        // Clear interval when countdown reaches 0
-        if (countdown === 0) {
-          clearInterval(interval);
-        }
-      }, 1000);
+        // Set up interval to update every second
+        const interval = setInterval(() => {
+          countdown = getRemainingSeconds();
 
-      // Cleanup interval on effect cleanup
-      return () => clearInterval(interval);
+          // Clear interval when countdown reaches 0
+          if (countdown === 0) {
+            clearInterval(interval);
+          }
+        }, 1000);
+
+        // Cleanup interval on effect cleanup
+        return () => clearInterval(interval);
+      } else {
+        countdown = 0;
+      }
     } else {
       countdown = 0;
     }
@@ -211,14 +263,45 @@
   }
   
   /**
+   * Handle list deletion
+   * @param {Event} event - Click event
+   * @param {number} listId - ID of list to delete
+   */
+  async function handleDeleteList(event, listId) {
+    event.stopPropagation();
+
+    const confirmed = await confirmDialog(
+      'Are you sure you want to delete this list? Contacts in the list will not be deleted.',
+      { title: 'Delete List', confirmText: 'Delete', dangerous: true }
+    );
+    if (confirmed) {
+      if (activeTab === 'messages') {
+        deleteWhatsAppList(listId);
+      } else {
+        deleteList(listId);
+      }
+
+      // If the deleted list was selected, switch to All Contacts
+      if (selectedListId === listId) {
+        selectedListId = null;
+        onSelectedListChange(null);
+      }
+    }
+  }
+
+  /**
    * Handle contact deletion
    * @param {Event} event - Click event
    * @param {number} contactId - ID of contact to delete
    */
-  function handleDeleteContact(event, contactId) {
+  async function handleDeleteContact(event, contactId) {
     event.stopPropagation();
 
-    if (confirm('Are you sure you want to delete this contact?')) {
+    const confirmed = await confirmDialog(
+      'Are you sure you want to delete this contact?',
+      { title: 'Delete Contact', confirmText: 'Delete', dangerous: true }
+    );
+    if (confirmed) {
       if (activeTab === 'messages') {
         deleteWhatsAppContact(contactId);
       } else {
@@ -307,6 +390,17 @@
           </svg>
           <span>{list.name}</span>
           <span class="list-count">{getListContactCount(list.id)}</span>
+          <button
+            class="list-delete-button"
+            onclick={(e) => handleDeleteList(e, list.id)}
+            title="Delete list"
+            aria-label="Delete list"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+          </button>
         </div>
       {/each}
     </div>
@@ -342,11 +436,18 @@
         </div>
         <div class="contact-actions">
           {#if sendingState === 'sending'}
-            <div class="sending-indicator" title="Sending email...">
-              <svg class="spinner-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"></circle>
-              </svg>
-            </div>
+            {#if isRateLimitRetrying(contact.id)}
+              <!-- Rate limit retry - show countdown on current contact -->
+              <div class="rate-limit-indicator" title="Rate limited - retrying in {countdown}s">
+                <span class="rate-limit-time">{countdown}s</span>
+              </div>
+            {:else}
+              <div class="sending-indicator" title="Sending email...">
+                <svg class="spinner-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"></circle>
+                </svg>
+              </div>
+            {/if}
           {:else if sendingState === 'completed'}
             <div class="completed-indicator" title="Email sent successfully">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -629,6 +730,33 @@
     border-radius: 12px;
     min-width: 24px;
     text-align: center;
+    flex-shrink: 0;
+  }
+
+  .list-delete-button {
+    display: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    border: none;
+    background-color: transparent;
+    color: #888;
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    padding: 0;
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+
+  .list-item:hover .list-delete-button {
+    display: flex;
+  }
+
+  .list-delete-button:hover {
+    background-color: #ff4444;
+    color: white;
   }
 
   .list-item.selected .list-count {
@@ -774,7 +902,8 @@
   .sending-indicator,
   .completed-indicator,
   .failed-indicator,
-  .waiting-indicator {
+  .waiting-indicator,
+  .rate-limit-indicator {
     width: 32px;
     height: 32px;
     border-radius: 6px;
@@ -786,6 +915,29 @@
 
   .sending-indicator {
     color: #0066ff;
+  }
+
+  .rate-limit-indicator {
+    background-color: #ff980022;
+    color: #ff9800;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid #ff9800;
+    animation: pulse-orange 1s ease-in-out infinite;
+  }
+
+  .rate-limit-time {
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  @keyframes pulse-orange {
+    0%, 100% {
+      box-shadow: 0 0 0 0 rgba(255, 152, 0, 0.4);
+    }
+    50% {
+      box-shadow: 0 0 0 4px rgba(255, 152, 0, 0);
+    }
   }
 
   .completed-indicator {

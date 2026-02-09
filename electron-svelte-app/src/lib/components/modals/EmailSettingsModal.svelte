@@ -1,38 +1,48 @@
 <script>
   /**
    * Email Settings Modal Component
-   * Allows users to configure email provider (Zoho or cPanel)
+   * Allows users to configure email sending settings (SendGrid)
    */
 
   import { X } from 'lucide-svelte';
+  import { toastSuccess } from '../../stores/toastStore.js';
 
   let { isOpen = false, onClose = () => {} } = $props();
 
+  // Available email addresses (aliases)
+  const emailAddresses = [
+    { value: 'office@justhemis.com', label: 'Main Office (office@justhemis.com)' },
+    { value: 'uk@justhemis.com', label: 'UK Office (uk@justhemis.com)' },
+    { value: 'usa@justhemis.com', label: 'USA Office (usa@justhemis.com)' },
+    { value: 'canada@justhemis.com', label: 'Canada Office (canada@justhemis.com)' },
+    { value: 'australia@justhemis.com', label: 'Australia Office (australia@justhemis.com)' }
+  ];
+
+  // Default slogan color (turquoise)
+  const DEFAULT_SLOGAN_COLOR = '#40E0D0';
+
   // Load settings from localStorage or use defaults
   let settings = $state({
-    provider: localStorage.getItem('email_provider') || 'zoho',
-    cpanel: {
-      host: localStorage.getItem('cpanel_host') || '',
-      port: localStorage.getItem('cpanel_port') || '465',
-      secure: localStorage.getItem('cpanel_secure') === 'true' || true,
-      user: localStorage.getItem('cpanel_user') || '',
-      pass: localStorage.getItem('cpanel_pass') || ''
-    }
+    fromAddress: localStorage.getItem('email_from_address') || 'office@justhemis.com',
+    sloganColor: localStorage.getItem('email_slogan_color') || DEFAULT_SLOGAN_COLOR
   });
 
   /**
    * Save settings to localStorage
    */
   function saveSettings() {
-    localStorage.setItem('email_provider', settings.provider);
-    localStorage.setItem('cpanel_host', settings.cpanel.host);
-    localStorage.setItem('cpanel_port', settings.cpanel.port);
-    localStorage.setItem('cpanel_secure', settings.cpanel.secure.toString());
-    localStorage.setItem('cpanel_user', settings.cpanel.user);
-    localStorage.setItem('cpanel_pass', settings.cpanel.pass);
-    
-    alert('Email settings saved successfully!');
+    localStorage.setItem('email_from_address', settings.fromAddress);
+    localStorage.setItem('email_slogan_color', settings.sloganColor);
+
+    toastSuccess('Email settings saved successfully!');
     onClose();
+  }
+
+  /**
+   * Reset slogan color to default
+   */
+  function resetSloganColor() {
+    settings.sloganColor = DEFAULT_SLOGAN_COLOR;
   }
 
   /**
@@ -63,90 +73,84 @@
       </div>
 
       <div class="modal-body">
-        <!-- Email Provider Selection -->
-        <div class="form-group">
-          <label for="email-provider">Email Provider:</label>
-          <select id="email-provider" bind:value={settings.provider} class="modal-input">
-            <option value="zoho">Zoho Mail (justhemis@justhemis.com)</option>
-            <option value="cpanel">cPanel SMTP (Custom)</option>
-          </select>
+        <!-- SendGrid Info -->
+        <div class="info-note">
+          <p><strong>SendGrid Email Service</strong></p>
+          <p>Emails are sent via SendGrid API for reliable high-volume delivery.</p>
         </div>
 
-        {#if settings.provider === 'cpanel'}
-          <div class="cpanel-settings">
-            <h3>cPanel SMTP Configuration</h3>
-            
-            <div class="form-group">
-              <label for="cpanel-host">SMTP Host:</label>
+        <!-- From Address Selection -->
+        <div class="form-group">
+          <label for="from-address">Send From:</label>
+          <select id="from-address" bind:value={settings.fromAddress} class="modal-input">
+            {#each emailAddresses as addr}
+              <option value={addr.value}>{addr.label}</option>
+            {/each}
+          </select>
+          <small>Select which office email to send from</small>
+        </div>
+
+        <div class="section-divider"></div>
+
+        <!-- Email Template Branding -->
+        <div class="form-section">
+          <h3>Email Template Branding</h3>
+
+          <div class="form-group">
+            <label for="slogan-color">Slogan Color:</label>
+            <div class="color-picker-row">
               <input
-                id="cpanel-host"
+                id="slogan-color"
+                type="color"
+                bind:value={settings.sloganColor}
+                class="color-picker"
+              />
+              <input
                 type="text"
-                bind:value={settings.cpanel.host}
-                placeholder="mail.yourdomain.com"
-                class="modal-input"
+                bind:value={settings.sloganColor}
+                class="color-hex-input"
+                placeholder="#40E0D0"
+                maxlength="7"
               />
-              <small>Usually mail.yourdomain.com</small>
+              <button class="reset-color-btn" onclick={resetSloganColor} title="Reset to default">
+                Reset
+              </button>
             </div>
+            <small>Choose the color for the slogan text in email headers</small>
+          </div>
 
-            <div class="form-group">
-              <label for="cpanel-port">SMTP Port:</label>
-              <select id="cpanel-port" bind:value={settings.cpanel.port} class="modal-input">
-                <option value="465">465 (SSL)</option>
-                <option value="587">587 (TLS)</option>
-              </select>
-            </div>
-
-            <div class="form-group">
-              <label for="cpanel-secure">
-                <input
-                  id="cpanel-secure"
-                  type="checkbox"
-                  bind:checked={settings.cpanel.secure}
-                />
-                Use SSL/TLS
-              </label>
-              <small>Enable for ports 465 (SSL) or 587 (TLS)</small>
-            </div>
-
-            <div class="form-group">
-              <label for="cpanel-user">Email Address:</label>
-              <input
-                id="cpanel-user"
-                type="email"
-                bind:value={settings.cpanel.user}
-                placeholder="your-email@yourdomain.com"
-                class="modal-input"
-              />
-            </div>
-
-            <div class="form-group">
-              <label for="cpanel-pass">Email Password:</label>
-              <input
-                id="cpanel-pass"
-                type="password"
-                bind:value={settings.cpanel.pass}
-                placeholder="Your email password"
-                class="modal-input"
-              />
-            </div>
-
-            <div class="info-box">
-              <strong>How to find your cPanel SMTP settings:</strong>
-              <ol>
-                <li>Log in to your cPanel account</li>
-                <li>Go to "Email Accounts"</li>
-                <li>Click "Connect Devices" next to your email</li>
-                <li>Look for "Mail Client Manual Settings"</li>
-              </ol>
+          <!-- Email Header Preview -->
+          <div class="preview-section">
+            <label>Preview:</label>
+            <div class="email-preview">
+              <div class="preview-header">
+                <div class="preview-logo">
+                  <img src="https://justhemis.com/logo.png" alt="Justhemis" width="80" />
+                </div>
+                <div class="preview-slogan" style="color: {settings.sloganColor};">
+                  Your intelligent legal portal<br/>built for modern law
+                </div>
+              </div>
+              <div class="preview-divider"></div>
+              <div class="preview-body">
+                <p>Your email content will appear here...</p>
+              </div>
             </div>
           </div>
-        {:else}
-          <div class="info-box">
-            <strong>Zoho Mail Configuration:</strong>
-            <p>Using hardcoded Zoho Mail account: <strong>justhemis@justhemis.com</strong></p>
-            <p>No additional configuration needed.</p>
-          </div>
-        {/if}
+        </div>
+
+        <!-- Display Names Info -->
+        <div class="info-box">
+          <strong>Email Display Names</strong>
+          <p>Recipients will see a friendly display name:</p>
+          <ul>
+            <li>office@justhemis.com - "Justhemis Office"</li>
+            <li>uk@justhemis.com - "Justhemis UK"</li>
+            <li>usa@justhemis.com - "Justhemis USA"</li>
+            <li>canada@justhemis.com - "Justhemis Canada"</li>
+            <li>australia@justhemis.com - "Justhemis Australia"</li>
+          </ul>
+        </div>
       </div>
 
       <div class="modal-footer">
@@ -297,17 +301,6 @@
     font-size: 0.85rem;
   }
 
-  .cpanel-settings {
-    margin-top: 20px;
-  }
-
-  .cpanel-settings h3 {
-    margin: 0 0 16px 0;
-    font-size: 1.2rem;
-    font-weight: 600;
-    color: #fff;
-  }
-
   .info-box {
     background-color: #1e1e1e;
     border-left: 4px solid #0066ff;
@@ -329,11 +322,11 @@
     font-size: 0.9rem;
   }
 
-  .info-box ol {
+  .info-box ul {
     margin: 8px 0;
     padding-left: 20px;
-    color: #ccc;
-    font-size: 0.9rem;
+    color: #aaa;
+    font-size: 0.85rem;
   }
 
   .info-box li {
@@ -399,5 +392,166 @@
   .modal-content::-webkit-scrollbar-thumb:hover {
     background: #555;
   }
-</style>
 
+  .info-note {
+    background-color: #1e3a1e;
+    border-left: 4px solid #4caf50;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    border-radius: 4px;
+  }
+
+  .info-note p {
+    margin: 4px 0;
+    color: #e0e0e0;
+    font-size: 0.9rem;
+  }
+
+  .info-note p:first-child {
+    font-weight: 600;
+    color: #4caf50;
+  }
+
+  /* Form Section Styling */
+  .form-section {
+    margin-bottom: 24px;
+  }
+
+  .form-section h3 {
+    margin: 0 0 16px 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #fff;
+  }
+
+  .section-divider {
+    height: 1px;
+    background-color: #444;
+    margin: 24px 0;
+  }
+
+  /* Color Picker Styling */
+  .color-picker-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .color-picker {
+    width: 50px;
+    height: 40px;
+    padding: 0;
+    border: 2px solid #444;
+    border-radius: 8px;
+    cursor: pointer;
+    background: transparent;
+  }
+
+  .color-picker::-webkit-color-swatch-wrapper {
+    padding: 2px;
+  }
+
+  .color-picker::-webkit-color-swatch {
+    border-radius: 4px;
+    border: none;
+  }
+
+  .color-hex-input {
+    width: 100px;
+    padding: 10px 12px;
+    border: 1px solid #444;
+    border-radius: 8px;
+    background-color: #1e1e1e;
+    color: #fff;
+    font-size: 0.9rem;
+    font-family: 'Consolas', 'Monaco', monospace;
+    text-transform: uppercase;
+  }
+
+  .color-hex-input:focus {
+    border-color: #0066ff;
+    outline: none;
+  }
+
+  .reset-color-btn {
+    padding: 10px 16px;
+    border: 1px solid #444;
+    border-radius: 8px;
+    background-color: #333;
+    color: #ccc;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .reset-color-btn:hover {
+    background-color: #444;
+    color: #fff;
+    border-color: #555;
+  }
+
+  /* Email Preview Styling */
+  .preview-section {
+    margin-top: 20px;
+  }
+
+  .preview-section > label {
+    display: block;
+    margin-bottom: 12px;
+    font-weight: 500;
+    color: #ccc;
+    font-size: 0.9rem;
+  }
+
+  .email-preview {
+    background-color: #ffffff;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  }
+
+  .preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 24px;
+    background-color: #ffffff;
+  }
+
+  .preview-logo {
+    flex-shrink: 0;
+  }
+
+  .preview-logo img {
+    display: block;
+  }
+
+  .preview-slogan {
+    font-family: 'Great Vibes', cursive;
+    font-size: 18px;
+    text-align: right;
+    line-height: 1.4;
+    transition: color 0.2s ease;
+  }
+
+  .preview-divider {
+    height: 1px;
+    background-color: #e0e0e0;
+    margin: 0 24px;
+  }
+
+  .preview-body {
+    padding: 20px 24px;
+    color: #333333;
+    font-size: 14px;
+  }
+
+  .preview-body p {
+    margin: 0;
+    color: #666;
+    font-style: italic;
+  }
+
+  /* Load Google Font for preview */
+  @import url('https://fonts.googleapis.com/css2?family=Great+Vibes&display=swap');
+</style>

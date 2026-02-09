@@ -1,6 +1,8 @@
 <script>
   import { whatsappContactsStore, getWhatsAppContactsInList } from '../../stores/database.js';
   import { sendWhatsAppMessage } from '../../services/twilio-ipc.js';
+  import { toastSuccess, toastError, toastWarning } from '../../stores/toastStore.js';
+  import { confirm as confirmDialog } from '../../stores/dialogStore.js';
 
   /**
    * Messages Composer Component
@@ -73,17 +75,20 @@ For more details, press the button below.`
   async function handleSendToAll() {
     const template = getSelectedTemplate();
     if (!template) {
-      alert('Please select a template');
+      toastWarning('Please select a template');
       return;
     }
 
     const contacts = getTargetContacts();
     if (contacts.length === 0) {
-      alert('No contacts to send to');
+      toastWarning('No contacts to send to');
       return;
     }
 
-    const confirmed = confirm(`Send template to ${contacts.length} contact(s)?`);
+    const confirmed = await confirmDialog(
+      `Send template to ${contacts.length} contact(s)?`,
+      { title: 'Send Messages', confirmText: 'Send', cancelText: 'Cancel', dangerous: false }
+    );
     if (!confirmed) return;
 
     isSending = true;
@@ -107,11 +112,11 @@ For more details, press the button below.`
         await new Promise(resolve => setTimeout(resolve, 1500));
       }
 
-      alert(`Template sent to ${contacts.length} contact(s) successfully!`);
+      toastSuccess(`Template sent to ${contacts.length} contact(s) successfully!`);
       selectedTemplateId = null;
     } catch (error) {
       console.error('Failed to send messages:', error);
-      alert('Failed to send messages: ' + error.message);
+      toastError('Failed to send messages: ' + error.message);
     } finally {
       isSending = false;
       sendingProgress = { current: 0, total: 0 };
